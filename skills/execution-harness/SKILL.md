@@ -81,15 +81,16 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 
 ```
 1. Read plan file (offset/limit — never whole file at once)
-2. Write plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending)
-3. agentdb_pattern_search for known gotchas in plan's modules
-4. Read user-memory for relevant project decisions
-5. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
-6. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
-7. Start loop: pick first unblocked pending task, spawn typed subagent
+2. Bash: mkdir -p <project-root>/.harness  (Write tool cannot create intermediate dirs)
+3. Write plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending)
+4. agentdb_pattern_search for known gotchas in plan's modules
+5. Read user-memory for relevant project decisions
+6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
+7. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
+8. Start loop: pick first unblocked pending task, spawn typed subagent
 ```
 
-If Step 2 already exists (resume): load it, skip pending tasks already `done`.
+If Step 3 already exists (resume): load it, skip pending tasks already `done`.
 
 ## Anti-patterns
 
