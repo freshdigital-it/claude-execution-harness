@@ -81,8 +81,9 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 
 ```
 1. Read plan file (offset/limit — never whole file at once)
-2. Bash: mkdir -p <project-root>/.harness  (Write tool cannot create intermediate dirs)
-3. Write plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending)
+2. Bash: PROJECT_ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || pwd) && mkdir -p "$PROJECT_ROOT/.harness" && echo "$PROJECT_ROOT"
+   → store result as PROJECT_ROOT; use absolute paths for ALL subsequent writes
+3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending)
 4. agentdb_pattern_search for known gotchas in plan's modules
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
