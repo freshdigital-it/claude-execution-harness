@@ -1,0 +1,56 @@
+# CLAUDE.md — Project template for execution-harness
+
+# Copy this file to your project root as CLAUDE.md, then customize.
+
+## Workflow
+
+For any multi-task plan, large feature, or launch workstream — invoke:
+```
+/execution-harness
+```
+This is the single orchestrator. Do NOT run a second loop alongside it.
+
+## Prerequisites (install once globally)
+
+1. **ECC** — typed subagent specialists (the "muscle"):
+   ```bash
+   claude /plugin install affaan-m/ECC
+   ```
+
+2. **Superpowers** — skill routing:
+   ```bash
+   claude /plugin install obra/superpowers
+   ```
+
+3. **Execution harness skill** — (this repo):
+   ```bash
+   # Already done if you ran setup.sh
+   ```
+
+## Wire the 300-LOC hook (per project, one-time)
+
+Add to `.claude/settings.json` in this project:
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Write|Edit",
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/skills/execution-harness/scripts/hooks/pretooluse-filesize.sh"
+      }]
+    }]
+  }
+}
+```
+
+## Standards
+
+@~/.claude/rules/clean-architecture.md
+@~/.claude/rules/behavioral.md
+
+## MCP Tools (optional but recommended)
+
+- **code-review-graph**: semantic code search, impact radius, decision-ledger reconciliation
+- **context7**: library/framework docs lookup (prevents hallucinated APIs)
+- **agentdb (claude-flow)**: `agentdb_pattern_store` / `agentdb_pattern_search` — cross-run memory
