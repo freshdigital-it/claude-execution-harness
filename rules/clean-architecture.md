@@ -19,7 +19,7 @@ Rules with **[HARD]** tag = never violate. Rules with **[SOFT]** = flag if viola
 - Maximum **300 lines** per file for new code
 - Maximum **500 lines** for editing existing files (never make them longer)
 - If a file you are editing already exceeds 500 lines, offer to split it
-- Config files, generated files, and migrations are exempt
+- Config files, generated files, migrations, and documentation files (`*.md`, `*.txt`, `*.rst`) are exempt
 - **Violation response**: "This file would exceed the 300-line limit. I'll split it into [X] and [Y]."
 
 ### Method / Function Length **[HARD]**
