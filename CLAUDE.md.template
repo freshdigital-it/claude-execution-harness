@@ -22,12 +22,17 @@ This is the single orchestrator. Do NOT run a second loop alongside it.
    claude /plugin install obra/superpowers
    ```
 
-3. **Execution harness skill** — (this repo):
+3. **claude-flow** — agentdb cross-run memory (`pattern_store` / `pattern_search`):
+   ```bash
+   claude /plugin install ruvnet/claude-flow
+   ```
+
+4. **Execution harness skill** — (this repo):
    ```bash
    # Already done if you ran setup.sh
    ```
 
-## Wire the 300-LOC hook (per project, one-time)
+## Wire both hooks (per project, one-time)
 
 Add to `.claude/settings.json` in this project:
 ```json
@@ -39,10 +44,19 @@ Add to `.claude/settings.json` in this project:
         "type": "command",
         "command": "~/.claude/skills/execution-harness/scripts/hooks/pretooluse-filesize.sh"
       }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "~/.claude/skills/execution-harness/scripts/hooks/harness-runend-guard.sh"
+      }]
     }]
   }
 }
 ```
+
+- **PreToolUse** — blocks writes over 300 lines in master and all subagents
+- **Stop** — blocks session end until every done task has a trajectory row and a run-report exists
 
 ## Standards
 

@@ -124,9 +124,9 @@ boros hanya bila "load everything".
 
 | Prasyarat | Status | Catatan |
 |---|---|---|
-| `supply-migration-blocker` | **OPEN** | `local-preview.sh` gagal di reksa-erp bila pakai migrate-fresh. Workaround P0: seed-DB snapshot, bukan fresh-migrate. |
+| `supply-migration-blocker` | **OPEN** | `local-preview.sh` gagal bila `make migrate` tidak ada atau migration path conflict. Workaround: seed-DB snapshot (`PREVIEW_SEED_DB`) atau `PREVIEW_SKIP_MIGRATE=1`. |
 | `code-review-graph` MCP aktif | **DONE** (re-enabled) | Butuh **restart sesi Claude** agar perubahan `settings.local.json` efektif. |
-| One-command local bring-up (reksa-erp) | **UNKNOWN** | `local-preview.sh` butuh: Go build lokal / cross-compile, port allocation, DB bring-up. Verifikasi ada sebelum tulis script. |
+| One-command local bring-up | **UNKNOWN** | `local-preview.sh` butuh: Go build (`GO_CMD`), port allocation, DB bring-up. Jalankan prerequisite verification (`reference/verification.md §2`) sebelum pertama kali pakai. |
 
 ## Urutan rollout
 
