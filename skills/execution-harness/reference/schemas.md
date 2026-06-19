@@ -97,3 +97,58 @@ Codebase-level decisions. Lives in project `docs/decision-ledger.md`.
 | 2026-06-10 | supply migrations use explicit schema order | 2 conflicting migrations can't apply on fresh DB | supply | — | open |
 | 2026-06-16 | Q2C portal uses staged payment schedule | finance team requirement for installment support | finance | old lump-sum approach | closed |
 ```
+
+---
+
+## trajectory.jsonl
+
+Append-only per-task trace. One compact JSON object per line. Location: `<project>/.harness/trajectory.jsonl`.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `ts` | ISO-8601 string | no | Timestamp task closed |
+| `run_id` | string | no | From Step-0 `RUN_ID` |
+| `task_id` | string | **yes** | Matches `plan.dag.json` task id |
+| `class` | string | **yes** | Task class (business, security-core, etc.) |
+| `model` | string | no | Model used |
+| `approach` | string | no | Strategy chosen (e.g. "middleware scope not inline") |
+| `files` | array | no | Files touched |
+| `gate_result` | string | **yes** | "pass" or "fail" |
+| `gate_findings` | int | no | Count of findings |
+| `reflection` | string | no | Root-cause or lesson from this task |
+| `tokens_est` | int | no | Estimated tokens used |
+| `status` | string | **yes** | "done", "failed", "reverted", "blocked" |
+
+**Required fields (validated by `trajectory-append.sh`):** `task_id`, `class`, `status`, `gate_result`.
+
+**Discipline:** jejak eksekusi → file JSONL, bukan agentdb. Melayani dua loop: recall plan-time + fitness offline (C4).
+
+## frontier.json
+
+Learned per-class routing stats. Location: `<project>/.harness/frontier.json`. Updated by `frontier-update.sh` at run-end (idempotent — recomputed from full corpus, never incremental).
+
+```json
+{
+  "updated": "2026-06-19T11:00:00Z",
+  "classes": {
+    "business": {
+      "model": "Sonnet",
+      "samples": 30,
+      "pass_rate": 0.93,
+      "revert_rate": 0.0,
+      "avg_tokens": 14000
+    }
+  }
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `updated` | ISO-8601 UTC | Last recompute timestamp |
+| `classes.<name>.model` | string | Most recent model used for this class |
+| `classes.<name>.samples` | int | Total tasks in corpus for this class |
+| `classes.<name>.pass_rate` | float (0–1) | Fraction with `gate_result == "pass"` |
+| `classes.<name>.revert_rate` | float (0–1) | Fraction with `status in (reverted, blocked)` |
+| `classes.<name>.avg_tokens` | int | Average `tokens_est` across corpus |
+
+**`safe_to_downgrade` guard:** `samples ≥ 10 AND revert_rate == 0.0 AND pass_rate ≥ 0.9`. Evaluated by `frontier-route.sh`. Advisory only — master always decides.

@@ -18,21 +18,23 @@ Each run allocates:
 
 Two parallel runs never touch the same DB or port. No clobber, no migration race.
 
-## supply-migration-blocker workaround (reksa-erp)
+## Migration conflict workaround
 
-Fresh-DB migration fails on reksa-erp (conflicting schema paths). Until resolved:
+Some projects have conflicting migration paths that prevent fresh-DB setup from working.
+If `make migrate` fails on a clean database, use one of these fallbacks:
 
 ```bash
-# Option A: seed snapshot (preferred)
+# Option A: seed snapshot (preferred — real data shape, full smoke coverage)
 PREVIEW_SEED_DB=scripts/seed/preview.sql \
   ~/.claude/skills/execution-harness/scripts/local-preview.sh
 
-# Option B: skip migrate (empty DB, limited smoke coverage)
+# Option B: skip migrate entirely (empty DB, limited smoke coverage)
 PREVIEW_SKIP_MIGRATE=1 \
   ~/.claude/skills/execution-harness/scripts/local-preview.sh
 ```
 
-Track blocker status in `docs/decision-ledger.md`.
+Track blocker status in `docs/decision-ledger.md` so future runs know to use the workaround
+without having to rediscover it via a failed migration.
 
 ## Simplify pass (over-engineering gate)
 
@@ -46,6 +48,19 @@ After the loop, before local-preview, run ONE bloat check on the run's diff. Cat
 
 Only removes orphans THIS run created. Never deletes pre-existing code (behavioral.md surgical-changes rule).
 
+## Learned routing (advisory)
+
+`frontier.json` is read at plan-time (Step-0 step 3) and written at run-end (`frontier-update.sh`).
+Model downgrade only when `safe_to_downgrade: true` — requires `samples >= 10 AND revert_rate == 0 AND pass_rate >= 0.9`.
+Master always decides; frontier injects data, never auto-applies. Always record reason in DAG `note` field. Never silent.
+
+## Trajectory recall (plan-time)
+
+Before classifying tasks, `grep` the project `.harness/trajectory.jsonl` and prior `run-report-*.md`
+for tasks touching the same modules. Surface past `reflection` + `gate_result` as priors
+(e.g. "similar task last failed on supply migration"). Budget: top-3 by recency, summaries only —
+never load the whole file into context.
+
 ## Decision-ledger reconciliation (plan-time)
 
 Run once after writing `plan.dag.json`, before first task.
@@ -54,7 +69,7 @@ Run once after writing `plan.dag.json`, before first task.
 2. `code-review-graph get_impact_radius` on those files → get overlapping modules.
 3. Read `docs/decision-ledger.md` entries where `module` overlaps (budget: ~1k tokens — not full ledger).
 4. Keyword-match: extract 3 key terms from task `title`; compare against each entry's `decision` field.
-   → Flag `DECISION-CONFLICT` if ≥2/3 terms match AND `status=open`.
+   → Flag `DECISION-CONFLICT` if >=2/3 terms match AND `status=open`.
 5. Per conflict:
    - **Verify first** — grep/read current code to confirm the decision still holds (stale-memory check).
    - Still valid → inject as hard constraint into that task's subagent prompt.
@@ -70,7 +85,7 @@ Heuristic: false-negative safer than false-positive — miss a subtle conflict r
 
 **Pre-run audit:** if run has >10 tasks, check `/context-budget` first. If context >50% full before loop starts, compact before first spawn.
 
-**Batch mechanical fan-out:** if plan has ≥3 `mechanical-fan` tasks touching non-overlapping files, fold into ONE subagent with an explicit task-list. Prevents N cold-spawn overhead for trivial work.
+**Batch mechanical fan-out:** if plan has >=3 `mechanical-fan` tasks touching non-overlapping files, fold into ONE subagent with an explicit task-list. Prevents N cold-spawn overhead for trivial work.
 
 **Pointer-not-corpus:** DAG, ledger, and repo-map live in files. Master holds path + slice (~1k token budget), never the full content.
 

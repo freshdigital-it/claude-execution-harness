@@ -56,6 +56,14 @@ Lazy, not negligent: trust-boundary validation, data-loss handling, security, an
 
 ## Memory: run-end (run once after last task)
 
+0. **Per task close (during loop):** master appends a trajectory row via
+   `scripts/trajectory-append.sh "$PROJECT_ROOT/.harness" '<row_json>'` using the
+   subagent's returned `{status, summary, approach, reflection}`. Required fields:
+   `task_id, class, status, gate_result`. This is enforced at Stop by `harness-runend-guard.sh`.
+   **`tokens_est`:** fill from Agent tool's `subagent_tokens` field in result metadata (preferred),
+   OR use class-based default if not available: `mechanical-fan=50000, business=60000,
+   security-core=80000, refactor=40000`. Never omit — `avg_tokens` in frontier is dead without it.
+
 1. `agentdb_pattern_store` any new gotcha. Schema:
    `{key: "<module>/<symptom>", module, gotcha, fix, confidence: high|medium}`
    Store only if: unexpected, reusable, not already in decision-ledger.
@@ -63,3 +71,5 @@ Lazy, not negligent: trust-boundary validation, data-loss handling, security, an
 2. Append to `docs/decision-ledger.md` if a durable codebase decision was made.
 3. Write project-memory only for facts likely to affect future runs.
 4. **State → file. Lessons → semantic memory.** Never store transient state semantically.
+5. **Update learned routing:** run `scripts/frontier-update.sh "$PROJECT_ROOT/.harness"` to recompute
+   `frontier.json` from the full trajectory corpus. Data-only aggregation, no judgment required.

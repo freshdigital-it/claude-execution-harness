@@ -65,14 +65,22 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 | `scripts/check_file_sizes.sh` | 300-LOC gate (run in CI or pre-commit) |
 | `scripts/hooks/pretooluse-filesize.sh` | PreToolUse hook — blocks Write/Edit >300/500 lines |
 | `scripts/deploy-lock.sh` | Explicit deploy gate (never called automatically) |
+| `scripts/trajectory-append.sh` | Append one task trajectory row to `.harness/trajectory.jsonl` (C1) |
+| `scripts/frontier-update.sh` | Recompute learned-routing `frontier.json` from full corpus at run-end (C3) |
+| `scripts/hooks/harness-runend-guard.sh` | Stop hook — blocks stop until trajectory complete + run-report exists (C2) |
 
 ## Wire the hook (one-time setup per project)
 
 Add to project `.claude/settings.json`:
 ```json
-"hooks": { "PreToolUse": [{ "matcher": "Write|Edit", "hooks": [
-  { "type": "command", "command": "~/.claude/skills/execution-harness/scripts/hooks/pretooluse-filesize.sh" }
-]}]}
+"hooks": {
+  "PreToolUse": [{ "matcher": "Write|Edit", "hooks": [
+    { "type": "command", "command": "~/.claude/skills/execution-harness/scripts/hooks/pretooluse-filesize.sh" }
+  ]}],
+  "Stop": [{ "hooks": [
+    { "type": "command", "command": "~/.claude/skills/execution-harness/scripts/hooks/harness-runend-guard.sh" }
+  ]}]
+}
 ```
 
 ## Step-0: execution opening moves
@@ -83,7 +91,11 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 1. Read plan file (offset/limit — never whole file at once)
 2. Bash: PROJECT_ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || pwd) && mkdir -p "$PROJECT_ROOT/.harness" && echo "$PROJECT_ROOT"
    → store result as PROJECT_ROOT; use absolute paths for ALL subsequent writes
-3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending)
+2b. Set `RUN_ID="run-$(date +%Y%m%d-%H%M%S)"`. Use it as the `run_id` field in every trajectory row this run.
+3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending).
+   For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
+   If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
+   The static task-class table remains the default; frontier is advisory only.
 4. agentdb_pattern_search for known gotchas in plan's modules
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
