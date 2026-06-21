@@ -34,12 +34,12 @@ Policy layer over ECC muscle. Drives plan to localhost-ready without mid-run int
 ## Lifecycle
 
 ```
-plan-time → classify tasks → plan.dag.json → recall (agentdb + decision-ledger)
+plan-time → [ambiguity check → ask user] → classify tasks → plan.dag.json → recall
 loop      → spawn typed subagent → gate → checkpoint
 post-loop → simplify pass → local-preview (isolated DB) → run-report → review-ledger
 ```
 
-→ `reference/lifecycle.md` for isolation details, supply-migration-blocker workaround, deploy gate.
+→ `reference/lifecycle.md` for isolation details, migration workaround, deploy gate.
 
 ## Deferred review (no mid-run interruption)
 
@@ -53,7 +53,7 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 
 ## Standing constraints (injected into every subagent)
 
-300-LOC [HARD], 30-line methods [HARD], type safety [HARD], TDD-by-class, clean-arch soft rules.
+300-LOC [HARD], 30-line methods [HARD], type safety [HARD], TDD-by-class, never-assume [HARD], clean-arch soft rules.
 
 → `reference/standing-constraints.md` for full constraint list + memory plan-time/run-end.
 
@@ -92,6 +92,28 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 2. Bash: PROJECT_ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || pwd) && mkdir -p "$PROJECT_ROOT/.harness" && echo "$PROJECT_ROOT"
    → store result as PROJECT_ROOT; use absolute paths for ALL subsequent writes
 2b. Set `RUN_ID="run-$(date +%Y%m%d-%H%M%S)"`. Use it as the `run_id` field in every trajectory row this run.
+
+[AMBIGUITY CHECK — run before writing DAG]
+2c. Scan the plan for anything unclear: missing acceptance criteria, ambiguous scope,
+    conflicting interpretations, unknown env/config values, or unresolved "TBD".
+    Build a numbered list of questions. If list is non-empty → STOP. Show the list
+    to the user and wait for answers before continuing. Only proceed when all questions
+    are answered or explicitly waived by the user.
+
+    Format:
+    ---
+    Sebelum mulai, saya perlu klarifikasi N hal:
+    1. [pertanyaan konkret — bukan "apakah sudah benar?" tapi "X berarti A atau B?"]
+    2. ...
+    ---
+
+    Trigger words that always require a question (never assume):
+    - "sesuaikan dengan X" tanpa X yang jelas
+    - "seperti biasa" / "seperti yang lama"
+    - "cukup" / "saja" / "minimal" tanpa ukuran
+    - nama file/path yang tidak ada di codebase
+    - env var yang tidak ada di .env.example
+
 3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending).
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
    If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
@@ -105,6 +127,20 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 
 If Step 3 already exists (resume): load it, skip pending tasks already `done`.
 
+## Mid-run blocked tasks
+
+If a subagent returns `status: blocked`:
+1. Update DAG `status` → `blocked`, copy `blocked_reason` from subagent return
+2. **STOP the loop** — do not continue to the next task
+3. Surface the blocked reason to the user:
+   ```
+   [task-00N] BLOCKED: <blocked_reason>
+   Asumsi default jika dilanjutkan: <assumption_if_unblocked>
+   Jawab untuk melanjutkan, atau ketik "gunakan asumsi default".
+   ```
+4. After user answers → update task spec in DAG `note` field → re-spawn subagent
+5. Resume loop from this task
+
 ## Anti-patterns
 
 - Loading whole plan into master context (→ thrash).
@@ -113,3 +149,4 @@ If Step 3 already exists (resume): load it, skip pending tasks already `done`.
 - Parallel writers to one shared file (→ merge conflict).
 - Deploy in autonomous loop without `--deploy=staging` flag.
 - Two orchestrators running simultaneously.
+- **Assuming instead of asking** — any ambiguity not surfaced at Step-0 or mid-run is a harness bug.

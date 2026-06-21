@@ -30,6 +30,31 @@ Lazy, not negligent: trust-boundary validation, data-loss handling, security, an
 - SQL: parameterized queries only.
 - Validate at system boundaries (HTTP, CLI args, events). Trust internal code.
 
+## Never assume silently [HARD]
+
+Berlaku untuk master DAN semua subagent.
+
+**Master (plan-time, Step-0 2c):**
+- Jika ada ketidakjelasan dalam plan → STOP, tanya user, tunggu jawaban sebelum DAG ditulis.
+- Jangan pernah menginterpretasi diam-diam lalu jalan. Tanya dulu.
+
+**Subagent (mid-task):**
+- Jika menemukan ambiguitas dalam spec task → return `status: blocked` dengan `blocked_reason`.
+- Jangan pernah pilih satu interpretasi dan lanjutkan tanpa lapor.
+- Kalau asumsi tidak bisa dihindari (scope sangat kecil, dampak reversibel): catat di field `assumptions` trajectory row. Field ini tidak boleh kosong jika ada yang diasumsikan.
+
+**Trigger yang SELALU harus jadi pertanyaan (tidak boleh diasumsikan):**
+- Referensi ke sesuatu yang tidak ada: file, path, env var, fungsi yang tidak ketemu di codebase
+- Instruksi ambigu: "sesuaikan dengan X", "seperti biasa", "yang lama", tanpa referensi konkret
+- Ukuran tidak jelas: "cukup", "minimal", "sedikit" tanpa angka atau batas yang bisa diverifikasi
+- Konflik antara dua bagian plan yang kontradiktif
+- Dependency pada task lain yang statusnya belum `done`
+
+**Yang TIDAK perlu ditanya (lanjut saja):**
+- Konvensi kode yang sudah jelas dari codebase (ikuti saja)
+- Detail implementasi teknis yang tidak mempengaruhi perilaku eksternal
+- Urutan eksekusi internal yang tidak disebutkan di plan
+
 ## Soft (guidance, not hard block)
 - Cyclomatic complexity ≤ 10 branches/method.
 - Max 5 constructor dependencies.
@@ -63,6 +88,8 @@ Lazy, not negligent: trust-boundary validation, data-loss handling, security, an
    **`tokens_est`:** fill from Agent tool's `subagent_tokens` field in result metadata (preferred),
    OR use class-based default if not available: `mechanical-fan=50000, business=60000,
    security-core=80000, refactor=40000`. Never omit — `avg_tokens` in frontier is dead without it.
+   **`assumptions`:** list setiap asumsi yang dibuat subagent. Kosongkan array `[]` hanya jika
+   benar-benar tidak ada asumsi. Jangan omit field ini.
 
 1. `agentdb_pattern_store` any new gotcha. Schema:
    `{key: "<module>/<symptom>", module, gotcha, fix, confidence: high|medium}`

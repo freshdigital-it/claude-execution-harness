@@ -45,6 +45,9 @@ Tulis di plan-time, update per-task, jadi sumber resume deterministik.
 | `gate` | `serial-human`(old) / `deferred-verify` / `pipeline` / `supervised` / `auto` | derived from class |
 | `split` | `true` if file >500 lines and must be split first | master at plan-time |
 | `status` | `pending` / `in-progress` / `done` / `blocked` / `failed` | master updates per-task |
+| `blocked_reason` | string — mengapa subagent tidak bisa lanjut tanpa klarifikasi | subagent returns, master copies |
+| `assumption_if_unblocked` | string — apa yang akan diasumsikan jika user minta lanjut tanpa jawaban | subagent returns |
+| `note` | string — frontier decision reason, user clarification answer, atau catatan lain | master |
 
 ---
 
@@ -118,6 +121,7 @@ Append-only per-task trace. One compact JSON object per line. Location: `<projec
 | `reflection` | string | no | Root-cause or lesson from this task |
 | `tokens_est` | int | no | Estimated tokens used |
 | `status` | string | **yes** | "done", "failed", "reverted", "blocked" |
+| `assumptions` | array of string | no | Asumsi yang dibuat subagent. `[]` jika tidak ada. Jangan omit jika ada asumsi — diaudit di review. |
 
 **Required fields (validated by `trajectory-append.sh`):** `task_id`, `class`, `status`, `gate_result`.
 
