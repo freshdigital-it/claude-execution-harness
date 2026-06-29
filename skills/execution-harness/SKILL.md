@@ -138,6 +138,80 @@ Add to project `.claude/settings.json`:
 }
 ```
 
+## Project Setup Detection (runs FIRST, before Phase 0, on every invocation)
+
+```
+Check: .github/workflows/harness-ci.yml exists?
+Check: deploy-config.sh exists AND DEPLOY_STAGING_CMD is non-empty?
+
+If BOTH exist → skip setup, proceed to Phase 0.
+
+If EITHER missing → PROJECT SETUP (one-time, master does everything):
+
+  Master asks in ONE batch:
+  ---
+  Saya perlu beberapa info untuk setup project ini sekali saja.
+  Jawab semua — tidak ada yang bisa dilewati:
+
+  1. STAGING URL — URL deployment staging?
+     (contoh: https://staging.example.com)
+
+  2. STAGING DEPLOY COMMAND — command untuk deploy ke staging?
+     (contoh: rsync -av dist/ user@host:/var/www/app/
+      atau: docker push registry/app:staging && ssh user@host 'docker compose pull && docker compose up -d'
+      atau: vercel --prod --token=$VERCEL_TOKEN)
+
+  3. PRODUCTION DEPLOY COMMAND — command untuk deploy ke production?
+     (sama seperti staging tapi endpoint berbeda, atau beda strategy)
+
+  4. HEALTH CHECK ENDPOINT — path untuk cek server sehat setelah deploy?
+     (default: /api/health — tekan Enter untuk pakai default)
+
+  5. BUILD COMMAND — command build frontend?
+     (default: npm run build — tekan Enter untuk pakai default)
+
+  6. PREVIEW COMMAND — command serve hasil build untuk testing lokal/CI?
+     (default: npx serve dist -p 4173 — tekan Enter untuk pakai default)
+
+  7. ROLLBACK COMMAND — cara revert kalau deploy gagal? (opsional)
+     (contoh: ssh user@host 'cd /app && git checkout $(git tag -l | tail -2 | head -1)')
+     Kosongkan jika ingin pakai git fallback otomatis.
+
+  8. SECRET NAMES yang dibutuhkan deploy command?
+     (contoh: SSH_PRIVATE_KEY, VERCEL_TOKEN — ini yang akan kamu tambah di GitHub)
+  ---
+
+  After user answers — master does ALL of this automatically:
+
+  A. Generate deploy-config.sh from answers:
+     Write file with DEPLOY_STAGING_CMD, DEPLOY_PROD_CMD, HEALTH_CHECK_URL, ROLLBACK_CMD
+
+  B. Generate CI workflow:
+     Bash: ~/.claude/skills/execution-harness/scripts/ci-generate.sh \
+       "$PROJECT_ROOT" "<staging-url-from-answer-1>"
+     Also replace build/preview commands in generated workflow with answers 5+6.
+
+  C. Commit setup files:
+     git add deploy-config.sh .github/workflows/harness-ci.yml
+     git commit -m "ci: harness project setup (CI + deploy config)"
+
+  D. Show ONE manual step (the only thing that genuinely requires GitHub UI access):
+     ---
+     Setup selesai. Satu langkah yang perlu kamu lakukan di GitHub:
+
+     GitHub → Settings → Environments → buat dua environment: "staging" dan "production"
+     Tambah secrets berikut di masing-masing:
+       <secret names dari jawaban 8>
+
+     Ini adalah satu-satunya langkah yang tidak bisa dilakukan otomatis
+     karena menyentuh credentials yang tidak boleh ada di dalam harness.
+
+     Setelah selesai, ketik 'lanjut'.
+     ---
+
+  E. After user responds → proceed to Phase 0.
+```
+
 ## Phase 0: Planning (runs before Step-0 if no approved plan exists)
 
 ```
@@ -361,6 +435,8 @@ If a subagent returns `status: blocked`:
 - **Skipping fe-server-check.sh** — FE verification without health check is unreliable (Vite may serve stale build, producing false positives that cost iteration cycles).
 - **Running `ux-contract-generate.py` but skipping human approval** — only `status: approved` contracts enter the loop. Draft contracts are skipped silently.
 - **Screenshotting in fe-component/fe-page** — image tokens only in `fe-visual`. Text-based conformance gate first.
+- **Memberikan instruksi setup manual ke user** — semua file (deploy-config.sh, harness-ci.yml) di-generate dan di-commit oleh master. Satu-satunya yang user lakukan manual adalah menambah GitHub secrets, karena itu menyentuh credentials.
+- **Skip Project Setup Detection** — wajib cek di setiap invocation. Kalau CI belum ada, setup dulu sebelum Phase 0.
 - **Skip Phase 0 karena "plan sudah ada di kepala"** — tanpa PRD/Spec/Plan yang di-approve, tidak ada SSOT. Subagent akan buat asumsi berbeda-beda.
 - **Tanya satu pertanyaan sekaligus di Phase 0** — batch semua pertanyaan dalam satu pesan.
 - **Generate Spec sebelum PRD di-approve** — urutan wajib: PRD → approve → Spec → approve → Plan → approve → Phase 1.
