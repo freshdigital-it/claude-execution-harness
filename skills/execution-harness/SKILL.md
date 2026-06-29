@@ -122,7 +122,19 @@ When `/execution-harness` is invoked, master runs these in order before the firs
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
 7. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
-8. Start loop: pick first unblocked pending task, spawn typed subagent
+8. Start loop: pick first unblocked pending task.
+   Read `model` field from DAG for that task. Spawn Agent with explicit model:
+
+   | class | Agent tool `model:` param |
+   |---|---|
+   | security-core | "opus" |
+   | business / bugfix | "sonnet" |
+   | mechanical-fan | "sonnet" (or "haiku" if frontier safe_to_downgrade) |
+   | refactor / FE-ops | "sonnet" |
+
+   ALWAYS set `model:` explicitly — NEVER omit it and let subagents inherit the
+   parent session model. Inheritance = if master runs on Opus, all subagents use
+   Opus regardless of class. This breaks cost control and is the #1 Opus-always bug.
 ```
 
 If Step 3 already exists (resume): load it, skip pending tasks already `done`.
@@ -149,4 +161,5 @@ If a subagent returns `status: blocked`:
 - Parallel writers to one shared file (→ merge conflict).
 - Deploy in autonomous loop without `--deploy=staging` flag.
 - Two orchestrators running simultaneously.
+- **Omitting `model:` when spawning Agent** — subagent inherits parent session model → all tasks use Opus if master runs on Opus.
 - **Assuming instead of asking** — any ambiguity not surfaced at Step-0 or mid-run is a harness bug.
