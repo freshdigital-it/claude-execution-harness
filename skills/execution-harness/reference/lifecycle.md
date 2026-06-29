@@ -9,7 +9,64 @@ post-loop  → simplify pass → local-preview (eval) → run-report → review-
 deploy     → manual opt-in only (--deploy=staging)
 ```
 
-## Local isolation (per-worktree, zero shared state)
+## Git worktree model (parallel agent isolation)
+
+The harness runs multiple agents simultaneously. Each agent gets an **isolated git worktree** — a complete copy of the project at the current HEAD, in a separate directory. Agents write files in their worktree; master serializes all commits into the main project.
+
+```
+Main project dir  (feature/X branch — master commits here)
+  /tmp/harness-<run>-task-001   <- Agent A  (detached HEAD)
+  /tmp/harness-<run>-task-002   <- Agent B  (detached HEAD)
+  /tmp/harness-<run>-task-003   <- Agent C  (detached HEAD)
+```
+
+**Why detached HEAD?** Git forbids checking out the same branch in two worktrees. Agents use detached HEAD at the current feature branch commit — same content, no branch association. Only master operates on the actual branch.
+
+**Parallel execution protocol (per group):**
+```
+SPAWN  -> worktree-setup.sh (register claims) + spawn ALL agents simultaneously
+WAIT   -> all agents in the group return
+CHECK  -> verify no two agents' files_changed_actual overlap (safety net)
+COMMIT -> worktree-teardown.sh per agent (sequential, one at a time):
+          copy files -> git add (specific) -> git commit -> remove worktree
+```
+
+**File claim registry** (`.harness/file-claims.json`):
+- Schema: `{"active": {"task-001": {"files": ["src/pay.go"], "worktree": "/tmp/...", "status": "running"}}}`
+- `worktree-setup.sh` rejects any task whose `files_touched` overlaps an active claim.
+- Conflicting task is moved to the next sequential group instead of running in parallel.
+- Claims released atomically (temp file + os.replace) by `worktree-teardown.sh` after commit.
+
+**Parallel grouping** (`scripts/parallel-group-plan.py`):
+Tasks land in the same group when their `files_touched` sets are disjoint AND they have no explicit DAG `deps` on each other. Tasks that fail this test get their own sequential group.
+
+**Crash recovery:**
+Stale worktrees survive crashes in `/tmp/harness-<run>-*`.
+Clean: `git worktree list` -> `git worktree remove --force <path>` per stale entry.
+Also remove stale entries from `.harness/file-claims.json` `active` block.
+
+## Branch lifecycle
+
+```
+P0f (plan confirmed, before first task):
+  git fetch origin --prune
+  PREFIX = feature | fix | chore | hotfix   (derived from PRD type)
+  if branch exists -> git checkout $PREFIX/$KEBAB        (resume)
+  else             -> git checkout -b $PREFIX/$KEBAB origin/main  (fresh)
+  GUARD: [[ $(git branch --show-current) == "main" ]] && HALT
+
+Per task (gate PASS):
+  worktree-teardown.sh -> git add <files_touched> -> git commit (Commit Convention)
+
+Phase 3 (qa-gate GO):
+  git push -u origin HEAD -> gh pr create
+
+Post-merge:
+  git push origin --delete $BRANCH_NAME
+  git branch -d $BRANCH_NAME
+```
+
+## Local isolation (preview server, zero shared state)
 
 Each run allocates:
 - **Port**: auto (ephemeral), never shared between worktrees

@@ -158,6 +158,9 @@ EOF
 | `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
 | `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO before PR/deploy. |
+| `scripts/parallel-group-plan.py` | **Parallel** Build parallel execution groups from plan.dag.json — groups tasks with disjoint files_touched + no DAG deps. |
+| `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree for one agent + register file claims (conflict detection). |
+| `scripts/worktree-teardown.sh` | **Parallel** Copy agent output to main project + commit (serialized) + remove worktree + release claims. |
 | `scripts/ci-generate.sh` | **CI** Generate `.github/workflows/harness-ci.yml` — runs harness scripts in CI, auto-deploys staging on PR. |
 | `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project `deploy-config.sh`. Staging auto, production explicit. |
 | `scripts/rollback.sh` | **Rollback** Auto-triggered by `deploy.sh` on health check failure. |
@@ -276,11 +279,35 @@ P0e. Plan generation (after Spec approved):
      Generate plan (writing-plans protocol). Show task classification preview + token estimate.
      Wait for user to type 'mulai'. Save: docs/plans/YYYY-MM-DD-<feature>.md
 
-P0f. Feature branch creation (after user types 'mulai', before any implementation):
-     KEBAB=$(python3 -c "import re,sys; print(re.sub(r'[^a-z0-9]+','-','<feature-name-from-PRD>'.lower()).strip('-'))")
-     git checkout -b feature/$KEBAB
-     → ALL per-task commits land on this branch from this point.
-     → Isolation: no implementation ever touches main/master.
+P0f. Feature branch setup (after user types 'mulai', before any implementation):
+
+     # 1. Derive branch prefix from PRD type:
+     #    new capability  → feature/
+     #    bug / regression → fix/
+     #    tooling / deps   → chore/
+     #    urgent prod fix  → hotfix/
+     PREFIX=<derived from PRD type>
+     KEBAB=$(python3 -c "import re; print(re.sub(r'[^a-z0-9]+','-','<feature-name-from-PRD>'.lower()).strip('-'))")
+     BRANCH_NAME="$PREFIX/$KEBAB"
+
+     # 2. Fetch latest remote state before branching
+     git fetch origin --prune
+
+     # 3. Resume or create
+     if git show-ref --verify --quiet refs/heads/$BRANCH_NAME; then
+         git checkout $BRANCH_NAME          # resume: branch already exists
+     else
+         git checkout -b $BRANCH_NAME origin/main   # fresh: base off remote main
+     fi
+
+     # 4. HARD GUARD — never run on main/master
+     CURRENT=$(git branch --show-current)
+     if [[ "$CURRENT" == "main" || "$CURRENT" == "master" ]]; then
+         HALT: "harness must not run on main/master — branch setup failed. Investigate."
+     fi
+
+     # Note: branch cleanup after PR merge:
+     #   git push origin --delete $BRANCH_NAME && git branch -d $BRANCH_NAME
 
 → HARD GATE: Phase 1 TIDAK dimulai sampai user confirm plan.
 → full question protocol + document schemas: reference/planning.md
@@ -343,7 +370,15 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
       → Master stores test file paths in each task's DAG fe_contract field.
       User does NOT run any of these — master injects them into subagent context at loop time.
 
-3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
+3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending/files_touched/deps).
+   `files_touched` is critical for parallel grouping — estimate from task spec + plan file paths.
+   `deps` is explicit dependency list (task IDs that must complete first).
+
+   After DAG is written, build parallel execution groups:
+     Bash: python3 ~/.claude/skills/execution-harness/scripts/parallel-group-plan.py \
+       "$PROJECT_ROOT/.harness/plan.dag.json" \
+       "$PROJECT_ROOT/.harness/parallel-groups.json"
+   Log: "[group-001: task-001, task-002 can parallel] [group-002: task-003 sequential]"
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
    If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
    If frontier reports `downgrade_note` (Haiku cold-start warning), record it explicitly in DAG `note`.
@@ -352,10 +387,10 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
 7. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
-8. Start loop: pick first unblocked pending task.
-   Read `model` and `effort` fields from DAG. Spawn Agent with BOTH explicit params:
+8. Parallel loop — master iterates over groups from parallel-groups.json:
 
-   | class | Agent `model:` | Agent `effort:` |
+   Model/effort routing table (ALWAYS set BOTH explicitly):
+   | class | model | effort |
    |---|---|---|
    | security-core | "sonnet" | "high" |
    | business / bugfix | "sonnet" | "medium" |
@@ -367,39 +402,74 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
    | fe-api-wiring | "sonnet" | "medium" |
    | fe-visual | "sonnet" | "high" |
 
-   For any FE sub-class (fe-*): inject FE context bundle before spawn:
-     - relevant section from approved ux-contracts/<screen>.yaml
-     - design-tokens.json (full, ~400 tok)
-     - component inventory manifest (~400 tok, generated plan-time)
-     - failing Playwright test: tests/e2e/ux-contracts/<screen>.spec.ts
-     - failing behavior test: tests/unit/ux-contracts/<screen>.test.ts
-     - instruction: "Tests are currently FAILING. Make them pass. Do not modify test files."
-   Before any FE verification step (master, not subagent):
-     Bash: ~/.claude/skills/execution-harness/scripts/fe-server-check.sh $PREVIEW_URL
-     Exit 1 → rebuild + retry 1x before spawning evaluator.
-   After fe-visual PASS — first time for a given screen (master, automatic):
-     Bash: ~/.claude/skills/execution-harness/scripts/fe-vrt-baseline.sh capture \
-       $PREVIEW_URL <route> <screen_id> --harness-dir "$PROJECT_ROOT/.harness"
-     Subsequent fe-visual runs: run diff first. If diff PASS → skip GAN evaluator entirely.
-   At each phase boundary (master, automatic, BLOCKING):
-     Bash: ~/.claude/skills/execution-harness/scripts/phase-integration-gate.sh \
-       $PROJECT_ROOT $PREVIEW_URL --phase <phase-name>
-     Exit 1 → halt loop, surface to user. Not WARN-only.
+   For each group in parallel-groups.json:
 
-   If security-core gate fails twice → escalate to model: "opus", effort: "high".
-   Record escalation reason in DAG `note` field.
+     Skip group if ALL its tasks are already status=done.
 
-   After gate PASS — master commits immediately (see Commit Convention above):
-     Derive type from task class. Scope = task module/package. Body = task WHY.
-     git add <DAG files_touched> (specific files only — never -A)
-     git commit -m "type(scope): description\n\nWhy...\n\nTask: task-00N\nGate: PASS"
-     If hook fails → fix error → re-commit. NEVER --no-verify.
-     If gate FAIL or BLOCKED → DO NOT commit. Update DAG, surface to user.
+     ── SPAWN PHASE ─────────────────────────────────────────────────────
+     For each pending task in group — ALL AT ONCE (multiple Agent calls in one message):
 
-   ALWAYS set BOTH `model:` and `effort:` explicitly — NEVER omit either.
-   Omitting model: → subagent inherits parent session model (Opus parent = all Opus subagents).
-   Omitting effort: → subagent inherits parent session effort (default effort = maximum tokens).
-   Both omissions break cost control. This is the #1 token-spend bug.
+       a. Create isolated worktree:
+          WPATH=$(bash ~/.claude/skills/execution-harness/scripts/worktree-setup.sh \
+            "$PROJECT_ROOT" "$RUN_ID" "$TASK_ID" <files_touched from DAG...>)
+          If worktree-setup exits non-zero (file conflict detected) → skip parallel,
+          move conflicting task to next sequential group.
+
+       b. Build agent context:
+          - task spec from plan file
+          - standing constraints (reference/standing-constraints.md)
+          - For fe-* tasks: ux-contract YAML + design-tokens.json + failing test paths
+          - CRITICAL INSTRUCTION injected into every parallel agent prompt:
+            "Your isolated working directory is: $WPATH
+             ALL file operations MUST use absolute paths starting with $WPATH/
+             Do NOT read or write files outside $WPATH/
+             Do NOT run any git commands (add, commit, push, checkout).
+             When done, return: {gate_result, files_changed_actual: [...], summary}"
+
+       c. Spawn Agent(model=<from table>, effort=<from table>, prompt=<above>)
+
+     ── WAIT PHASE ──────────────────────────────────────────────────────
+     Wait for ALL agents in this group to return.
+
+     ── CONFLICT CHECK (safety net) ─────────────────────────────────────
+     Collect files_changed_actual from all agent results.
+     If any two agents report touching the same file:
+       HALT. Surface conflict to user. Do not commit either task.
+       User decides: re-run one sequentially, or merge manually.
+
+     ── COMMIT PHASE (serialized — one at a time) ────────────────────────
+     For each agent with gate PASS (in task-id order, not parallel):
+       bash ~/.claude/skills/execution-harness/scripts/worktree-teardown.sh \
+         "$PROJECT_ROOT" "$RUN_ID" "$TASK_ID" \
+         "$(printf 'type(scope): description\n\nWhy...\n\nTask: %s\nGate: PASS' $TASK_ID)"
+       → copies files from worktree to main project → git add → git commit → removes worktree
+
+       If pre-commit hook fails during teardown:
+         Fix the error (lint, typecheck). Re-run teardown. NEVER --no-verify.
+
+     For each agent with gate FAIL:
+       bash ~/.claude/skills/execution-harness/scripts/worktree-teardown.sh \
+         "$PROJECT_ROOT" "$RUN_ID" "$TASK_ID" "" --no-commit
+       Update DAG: status=failed. Surface to user.
+
+     ── FE-SPECIFIC (master, per task, after commit) ─────────────────────
+     Before any FE verification:
+       Bash: scripts/fe-server-check.sh $PREVIEW_URL
+       Exit 1 → rebuild + retry 1x.
+     After fe-visual PASS (first time per screen):
+       Bash: scripts/fe-vrt-baseline.sh capture $PREVIEW_URL <route> <screen_id> \
+         --harness-dir "$PROJECT_ROOT/.harness"
+       Subsequent: run diff first. diff PASS → skip GAN entirely.
+
+     ── PHASE BOUNDARY (after group that completes a phase) ─────────────
+     Bash: scripts/phase-integration-gate.sh $PROJECT_ROOT $PREVIEW_URL --phase <name>
+     Exit 1 → halt loop. Not WARN-only.
+
+   Security-core gate fails twice → escalate model: "opus", effort: "high" for that task only.
+   Record escalation in DAG `note` field.
+
+   Omitting model: or effort: is the #1 token-spend bug — subagent inherits parent session values.
+   ALWAYS set both explicitly per the table above.
 ```
 
 Post-loop — Phase 2 + Phase 3 (master runs in sequence):
@@ -505,3 +575,9 @@ If a subagent returns `status: blocked`:
 - **Committing a task with gate FAIL or BLOCKED** — only gate PASS earns a commit. FAIL = task not done; BLOCKED = needs user decision. Committing broken state breaks `git bisect` and corrupts the feature branch history.
 - **Using `--no-verify` on pre-commit hook failure** — hooks exist for a reason (lint, typecheck, secret detection). Fix the underlying error. `--no-verify` is never acceptable inside the harness.
 - **One big squash commit at Phase 3** — per-task granularity is intentional. Each commit maps to one task, one gate verdict, one traceable change. PR reviewers see the work history; `git bisect` works; blame is accurate.
+- **Running git commands inside a parallel subagent** — agents in worktrees must NOT run git add/commit/push/checkout. Master owns all git operations. Agent git commands corrupt the detached-HEAD worktree and cause teardown failures.
+- **Branching from stale local HEAD** — always `git fetch origin --prune` then `git checkout -b feature/X origin/main`. Without fetch, branch starts N commits behind remote, causing rebase conflicts at PR time.
+- **Hardcoding `feature/` prefix** — derive from PRD type: fix/ for bugs, chore/ for tooling, hotfix/ for urgent production issues. Wrong prefix obscures intent in the PR list.
+- **Skipping branch existence check** — on resume, `git checkout -b` fails if branch exists. Always: `git show-ref --verify` → checkout if exists, create if not.
+- **Skipping guard against main/master** — if branch creation silently fails, per-task commits land directly on main. Always verify `git branch --show-current` after P0f before any implementation.
+- **Leaving worktrees after crash** — if harness crashes mid-run, stale worktrees accumulate in /tmp. Run `git worktree list` and `git worktree remove --force` on cleanup.
