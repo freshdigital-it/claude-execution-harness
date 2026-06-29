@@ -28,10 +28,12 @@ case "$FILE_PATH" in
   *_gen.go|*.pb.go|*_generated*) exit 0 ;;
 esac
 
+# Count lines robustly: awk counts unterminated final line correctly (wc -l does not).
+count_lines() { printf '%s' "$1" | awk 'END{print NR}'; }
+
 if [[ "$TOOL" == "Write" ]]; then
-  # Write: check full content length
   CONTENT=$(py "print(d.get('tool_input',{}).get('content',''))")
-  RESULT_LINES=$(echo "$CONTENT" | wc -l)
+  RESULT_LINES=$(count_lines "$CONTENT")
   [[ -f "$FILE_PATH" ]] && LIMIT=500 || LIMIT=300
 
   if (( RESULT_LINES > LIMIT )); then
@@ -41,13 +43,12 @@ if [[ "$TOOL" == "Write" ]]; then
   fi
 
 elif [[ "$TOOL" == "Edit" ]]; then
-  # Edit: calculate RESULTING file size = current - removed + added
-  [[ ! -f "$FILE_PATH" ]] && exit 0  # new file via Edit is unusual, skip
-  CURRENT_LINES=$(wc -l < "$FILE_PATH" 2>/dev/null || echo 0)
+  [[ ! -f "$FILE_PATH" ]] && exit 0
+  CURRENT_LINES=$(awk 'END{print NR}' "$FILE_PATH" 2>/dev/null || echo 0)
   OLD_STRING=$(py "print(d.get('tool_input',{}).get('old_string',''))")
   NEW_STRING=$(py "print(d.get('tool_input',{}).get('new_string',''))")
-  OLD_LINES=$(echo "$OLD_STRING" | wc -l)
-  NEW_LINES=$(echo "$NEW_STRING" | wc -l)
+  OLD_LINES=$(count_lines "$OLD_STRING")
+  NEW_LINES=$(count_lines "$NEW_STRING")
   RESULT_LINES=$(( CURRENT_LINES - OLD_LINES + NEW_LINES ))
 
   if (( RESULT_LINES > 500 )); then

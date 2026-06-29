@@ -18,18 +18,21 @@ Policy layer over ECC muscle. Drives plan to localhost-ready without mid-run int
 
 **1. Thin master** — master holds only: DAG, gate states, checkpoint log, plan checkboxes. All raw output (test logs, diffs, file bodies) lives and dies inside subagents. Subagent returns short summary + gate verdict, nothing raw.
 
-**2. Durable state in files** — `plan.dag.json` (per-task class/model/tdd/gate/status) + plan checkboxes + git commit per phase. Resume from files, not context. One controller + durable resume is the invariant, not one session.
+**2. Durable state in files** — `plan.dag.json` (per-task class/model/effort/tdd/gate/status) + plan checkboxes + git commit per phase. Resume from files, not context. One controller + durable resume is the invariant, not one session.
 
 **3. One loop-owner** — harness is the single orchestrator. Never invoke a second loop (SDD, orch-pipeline, etc.) inside it. Borrow their *techniques*, not their *invocation*.
 
 ## Task classes (set at plan-time in plan.dag.json)
 
-| Class | Model | TDD | Gate |
-|---|---|---|---|
-| security-core | Opus | test-first | deferred-verify |
-| business / bugfix | Sonnet | test-first | auto |
-| mechanical-fan | Sonnet/Haiku | no | pipeline |
-| refactor / FE-ops | Sonnet | no | auto |
+| Class | Model | Effort | TDD | Gate |
+|---|---|---|---|---|
+| security-core | Sonnet (Opus on 2× gate fail) | high | test-first | deferred-verify |
+| business / bugfix | Sonnet | medium | test-first | auto |
+| mechanical-fan | Haiku | low | no | pipeline |
+| refactor / FE-ops | Haiku | low | no | auto |
+
+Haiku for mechanical-fan/FE-ops unless the task requires architectural judgment or spans >10 files.
+Opus is reserved as difficulty escalation only — never as a class default.
 
 ## Lifecycle
 
@@ -43,13 +46,15 @@ post-loop → simplify pass → local-preview (isolated DB) → run-report → r
 
 ## Deferred review (no mid-run interruption)
 
-security-core → independent verifier (≠ implementer, Opus, negative tests, security-scan) → commit → append to `review-ledger.md`. Human reads ledger **once** at end, not per-task.
+security-core → independent verifier (≠ implementer instance, Sonnet, negative tests, security-scan) → commit → append to `review-ledger.md`. Human reads ledger **once** at end, not per-task.
+
+Verifier uses Sonnet (same tier as implementer, different instance). Escalate verifier to Opus only if implementer already used Opus AND gate failed once.
 
 ## Autonomy guards
 
-Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model escalation (DIFFICULTY only, never rate-limit) → stop-on-destructive.
+Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model escalation (DIFFICULTY only after 2× fail, never rate-limit) → stop-on-destructive.
 
-→ `reference/autonomy.md` for full guard specs + run-report template.
+→ `reference/autonomy.md` for full guard specs + model+effort routing table.
 
 ## Standing constraints (injected into every subagent)
 
@@ -114,27 +119,32 @@ When `/execution-harness` is invoked, master runs these in order before the firs
     - nama file/path yang tidak ada di codebase
     - env var yang tidak ada di .env.example
 
-3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/tdd/gate/split/status=pending).
+3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
    If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
+   If frontier reports `downgrade_note` (Haiku cold-start warning), record it explicitly in DAG `note`.
    The static task-class table remains the default; frontier is advisory only.
 4. agentdb_pattern_search for known gotchas in plan's modules
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
 7. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
 8. Start loop: pick first unblocked pending task.
-   Read `model` field from DAG for that task. Spawn Agent with explicit model:
+   Read `model` and `effort` fields from DAG. Spawn Agent with BOTH explicit params:
 
-   | class | Agent tool `model:` param |
-   |---|---|
-   | security-core | "opus" |
-   | business / bugfix | "sonnet" |
-   | mechanical-fan | "sonnet" (or "haiku" if frontier safe_to_downgrade) |
-   | refactor / FE-ops | "sonnet" |
+   | class | Agent `model:` | Agent `effort:` |
+   |---|---|---|
+   | security-core | "sonnet" | "high" |
+   | business / bugfix | "sonnet" | "medium" |
+   | mechanical-fan | "haiku" | "low" |
+   | refactor / FE-ops | "haiku" | "low" |
 
-   ALWAYS set `model:` explicitly — NEVER omit it and let subagents inherit the
-   parent session model. Inheritance = if master runs on Opus, all subagents use
-   Opus regardless of class. This breaks cost control and is the #1 Opus-always bug.
+   If security-core gate fails twice → escalate to model: "opus", effort: "high".
+   Record escalation reason in DAG `note` field.
+
+   ALWAYS set BOTH `model:` and `effort:` explicitly — NEVER omit either.
+   Omitting model: → subagent inherits parent session model (Opus parent = all Opus subagents).
+   Omitting effort: → subagent inherits parent session effort (default effort = maximum tokens).
+   Both omissions break cost control. This is the #1 token-spend bug.
 ```
 
 If Step 3 already exists (resume): load it, skip pending tasks already `done`.
@@ -157,9 +167,11 @@ If a subagent returns `status: blocked`:
 
 - Loading whole plan into master context (→ thrash).
 - Long-lived domain agents (→ idle context bloat).
-- Opus on rate-limit (→ same cap, burns faster).
+- Opus as class default (→ unnecessarily expensive; use Sonnet + escalate only on 2× fail).
+- Opus on rate-limit (→ same quota, burns faster; use checkpoint+backoff instead).
 - Parallel writers to one shared file (→ merge conflict).
 - Deploy in autonomous loop without `--deploy=staging` flag.
 - Two orchestrators running simultaneously.
-- **Omitting `model:` when spawning Agent** — subagent inherits parent session model → all tasks use Opus if master runs on Opus.
+- **Omitting `model:` when spawning Agent** — subagent inherits parent session model.
+- **Omitting `effort:` when spawning Agent** — subagent inherits parent session effort.
 - **Assuming instead of asking** — any ambiguity not surfaced at Step-0 or mid-run is a harness bug.

@@ -63,12 +63,16 @@ Berlaku untuk master DAN semua subagent.
 
 ## TDD by task class (pre-decided in plan.dag.json)
 
-| class | TDD mode |
-|---|---|
-| security-core | test-first — tests must pass before "done" |
-| business / bugfix | test-first |
-| mechanical-fan / refactor | no test-first — compiler + linter IS the test |
-| FE-ops / config | no test-first |
+| class | Model | Effort | TDD mode |
+|---|---|---|---|
+| security-core | Sonnet (Opus on 2× fail) | high | test-first — tests must pass before "done" |
+| business / bugfix | Sonnet | medium | test-first |
+| mechanical-fan | Haiku | low | no test-first — compiler + linter IS the test |
+| refactor | Sonnet | medium | no test-first |
+| FE-ops / config | Haiku | low | no test-first |
+
+Both `model:` and `effort:` MUST be passed explicitly on every Agent spawn (see SKILL.md Step-8).
+Omitting either causes subagent to inherit parent session defaults — breaking cost control.
 
 ## Memory: plan-time (run once before first task)
 
@@ -85,9 +89,11 @@ Berlaku untuk master DAN semua subagent.
    `scripts/trajectory-append.sh "$PROJECT_ROOT/.harness" '<row_json>'` using the
    subagent's returned `{status, summary, approach, reflection}`. Required fields:
    `task_id, class, status, gate_result`. This is enforced at Stop by `harness-runend-guard.sh`.
-   **`tokens_est`:** fill from Agent tool's `subagent_tokens` field in result metadata (preferred),
-   OR use class-based default if not available: `mechanical-fan=50000, business=60000,
-   security-core=80000, refactor=40000`. Never omit — `avg_tokens` in frontier is dead without it.
+   **`tokens_est`:** try Agent result metadata field `subagent_tokens` first (unverified — may not
+   exist in all runtime versions). If absent or zero, fall back to class constant:
+   `mechanical-fan=50000, business=60000, security-core=80000, refactor=40000`. Label the value as
+   "estimated" in that case. Never omit — `avg_tokens` in frontier is dead without it. Note:
+   if `subagent_tokens` is systematically absent, `avg_tokens` becomes a floor estimate, not a measurement.
    **`assumptions`:** list setiap asumsi yang dibuat subagent. Kosongkan array `[]` hanya jika
    benar-benar tidak ada asumsi. Jangan omit field ini.
 

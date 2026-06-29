@@ -26,8 +26,20 @@ if not c:
 safe = (c.get("samples", 0) >= min_n
         and c.get("revert_rate", 1.0) == 0.0
         and c.get("pass_rate", 0.0) >= min_pass)
-print(json.dumps({"class": cls, "known": True, "model": c.get("model"),
-                  "samples": c.get("samples"), "pass_rate": c.get("pass_rate"),
-                  "revert_rate": c.get("revert_rate"), "avg_tokens": c.get("avg_tokens"),
-                  "safe_to_downgrade": bool(safe)}))
+result = {
+    "class": cls, "known": True, "model": c.get("model"),
+    "samples": c.get("samples"), "pass_rate": c.get("pass_rate"),
+    "revert_rate": c.get("revert_rate"), "avg_tokens": c.get("avg_tokens"),
+    "safe_to_downgrade": bool(safe),
+}
+# Warn when downgrade evidence is for a different model than the downgrade target.
+# e.g. mechanical-fan corpus is Sonnet but downgrade would go to Haiku — cold start.
+if safe and cls == "mechanical-fan" and c.get("model") != "Haiku":
+    result["downgrade_note"] = (
+        "COLD START: safe_to_downgrade is based on "
+        + str(c.get("model", "unknown"))
+        + " corpus — no Haiku samples exist. "
+        "Haiku downgrade is a deliberate cold-start; record reason in DAG note field."
+    )
+print(json.dumps(result))
 PY

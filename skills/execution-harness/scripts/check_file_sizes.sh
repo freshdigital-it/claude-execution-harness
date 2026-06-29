@@ -11,7 +11,7 @@ LIMIT=300
 VIOLATIONS=()
 
 while IFS= read -r file; do
-  lines=$(wc -l < "$file" 2>/dev/null || echo 0)
+  lines=$(awk 'END{print NR}' "$file" 2>/dev/null || echo 0)
   if (( lines > LIMIT )); then
     VIOLATIONS+=("${lines}  ${file}")
   fi
