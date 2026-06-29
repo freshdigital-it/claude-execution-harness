@@ -99,6 +99,44 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 
 → `reference/standing-constraints.md` for full constraint list + memory plan-time/run-end.
 
+## Commit Convention
+
+Type derived from task class:
+
+| Class | Type |
+|---|---|
+| business / fe-* | `feat` |
+| bugfix | `fix` |
+| refactor | `refactor` |
+| mechanical-fan | `chore` |
+| security-core | `fix` |
+
+**Per-task commit** — master runs immediately after gate PASS, before moving to next task:
+
+```bash
+# Add only files this task touched (from DAG files_touched field — never git add -A)
+git add <files_touched_by_this_task>
+
+git commit -m "$(cat <<'EOF'
+type(scope): what changed — one line ≤72 chars
+
+WHY this was needed (1–2 sentences from task spec, not WHAT the code does).
+
+Task: task-00N
+Gate: PASS
+EOF
+)"
+```
+
+**Pre-commit hook failure**: if the hook rejects the commit (lint, typecheck, etc.):
+1. Fix the underlying error — do NOT use `--no-verify`
+2. Re-stage the fix with the same task files
+3. Retry the commit
+
+**Gate-fail protection** — NEVER commit if gate status is `FAIL` or `BLOCKED`:
+- `FAIL`: task is not done. Committing broken state corrupts `git bisect`.
+- `BLOCKED`: task needs user input. Commit after user unblocks and gate re-runs as PASS.
+
 ## Scripts
 
 | Script | Purpose |
@@ -183,17 +221,19 @@ If EITHER missing → PROJECT SETUP (one-time, master does everything):
 
   After user answers — master does ALL of this automatically:
 
-  A. Generate deploy-config.sh from answers:
+  A. Generate deploy-config.sh + protect it from accidental commit:
      Write file with DEPLOY_STAGING_CMD, DEPLOY_PROD_CMD, HEALTH_CHECK_URL, ROLLBACK_CMD
+     echo "deploy-config.sh" >> .gitignore
+     (deploy-config.sh may contain credentials or inline secrets — never commit it)
 
   B. Generate CI workflow:
      Bash: ~/.claude/skills/execution-harness/scripts/ci-generate.sh \
        "$PROJECT_ROOT" "<staging-url-from-answer-1>"
      Also replace build/preview commands in generated workflow with answers 5+6.
 
-  C. Commit setup files:
-     git add deploy-config.sh .github/workflows/harness-ci.yml
-     git commit -m "ci: harness project setup (CI + deploy config)"
+  C. Commit setup files (only CI workflow + .gitignore, NOT deploy-config.sh):
+     git add .gitignore .github/workflows/harness-ci.yml
+     git commit -m "ci: harness project setup (CI workflow + gitignore)"
 
   D. Show ONE manual step (the only thing that genuinely requires GitHub UI access):
      ---
@@ -235,6 +275,12 @@ P0d. Spec generation (after PRD approved):
 P0e. Plan generation (after Spec approved):
      Generate plan (writing-plans protocol). Show task classification preview + token estimate.
      Wait for user to type 'mulai'. Save: docs/plans/YYYY-MM-DD-<feature>.md
+
+P0f. Feature branch creation (after user types 'mulai', before any implementation):
+     KEBAB=$(python3 -c "import re,sys; print(re.sub(r'[^a-z0-9]+','-','<feature-name-from-PRD>'.lower()).strip('-'))")
+     git checkout -b feature/$KEBAB
+     → ALL per-task commits land on this branch from this point.
+     → Isolation: no implementation ever touches main/master.
 
 → HARD GATE: Phase 1 TIDAK dimulai sampai user confirm plan.
 → full question protocol + document schemas: reference/planning.md
@@ -343,6 +389,13 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
    If security-core gate fails twice → escalate to model: "opus", effort: "high".
    Record escalation reason in DAG `note` field.
 
+   After gate PASS — master commits immediately (see Commit Convention above):
+     Derive type from task class. Scope = task module/package. Body = task WHY.
+     git add <DAG files_touched> (specific files only — never -A)
+     git commit -m "type(scope): description\n\nWhy...\n\nTask: task-00N\nGate: PASS"
+     If hook fails → fix error → re-commit. NEVER --no-verify.
+     If gate FAIL or BLOCKED → DO NOT commit. Update DAG, surface to user.
+
    ALWAYS set BOTH `model:` and `effort:` explicitly — NEVER omit either.
    Omitting model: → subagent inherits parent session model (Opus parent = all Opus subagents).
    Omitting effort: → subagent inherits parent session effort (default effort = maximum tokens).
@@ -358,8 +411,8 @@ Post-loop — Phase 2 + Phase 3 (master runs in sequence):
      GO    → proceed to Phase 3.
 
   PHASE 3: Delivery (automatic after GO)
-  3. git checkout -b feature/<kebab-feature-name>
-     git add -A && git commit -m "feat: <feature name from PRD>"
+  3. Branch and per-task commits already done during loop (P0f + Step 8).
+     Just push:
      git push -u origin HEAD
 
   4. gh pr create with body:
@@ -447,3 +500,8 @@ If a subagent returns `status: blocked`:
 - **Deploying without qa-gate.sh** — deploy.sh requires qa-gate.json with verdict=GO. No gate = no deploy.
 - **Auto-deploying to production** — production deploy is NEVER in the loop. Always requires explicit `deploy.sh production --confirm`. Any attempt to auto-trigger it is a harness bug.
 - **Skipping rollback on health check failure** — deploy.sh calls rollback.sh automatically. Never just log the failure and leave a broken deploy in place.
+- **Creating feature branch in Phase 3** — branch is created in P0f (after plan confirmed, before first task). Implementation commits must land on the feature branch from the start, not on main.
+- **`git add -A` for per-task commits** — add only `files_touched` from the DAG. `git add -A` includes unrelated files (generated artifacts, .harness/ state, untracked temp files) and obscures what each task actually changed. Use specific file paths.
+- **Committing a task with gate FAIL or BLOCKED** — only gate PASS earns a commit. FAIL = task not done; BLOCKED = needs user decision. Committing broken state breaks `git bisect` and corrupts the feature branch history.
+- **Using `--no-verify` on pre-commit hook failure** — hooks exist for a reason (lint, typecheck, secret detection). Fix the underlying error. `--no-verify` is never acceptable inside the harness.
+- **One big squash commit at Phase 3** — per-task granularity is intentional. Each commit maps to one task, one gate verdict, one traceable change. PR reviewers see the work history; `git bisect` works; blame is accurate.
