@@ -41,11 +41,12 @@ Tulis di plan-time, update per-task, jadi sumber resume deterministik.
 
 | Field | Values | Set by |
 |---|---|---|
-| `class` | `security-core` / `business` / `bugfix` / `mechanical-fan` / `refactor` / `FE-ops` | master at plan-time |
+| `class` | `security-core` / `business` / `bugfix` / `mechanical-fan` / `refactor` / `fe-mechanical` / `fe-component` / `fe-page` / `fe-api-wiring` / `fe-visual` | master at plan-time |
 | `model` | `Sonnet` / `Haiku` / `Opus` | derived from class (see autonomy.md routing table) |
-| `effort` | `high` / `medium` / `low` | derived from class (security-core=high, business=medium, mechanical-fan/FE-ops=low) |
+| `effort` | `high` / `medium` / `low` | derived from class (security-core=high, business/fe-component/fe-page/fe-api-wiring=medium, mechanical-fan/refactor/fe-mechanical=low, fe-visual=high) |
 | `tdd` | `true` / `false` | derived from class (see standing-constraints.md) |
-| `gate` | `deferred-verify` / `pipeline` / `auto` | derived from class |
+| `gate` | `deferred-verify` / `pipeline` / `auto` / `conformance` / `conformance+fe-journey` / `auto+fixtures` / `GAN` | derived from class |
+| `fe_contract` | path string — e.g. `"ux-contracts/invoice-list.yaml"` | master at plan-time for fe-* classes. Only set for `status: approved` contracts. |
 | `split` | `true` if file >500 lines and must be split first | master at plan-time |
 | `status` | `pending` / `in-progress` / `done` / `blocked` / `failed` | master updates per-task |
 | `blocked_reason` | string — mengapa subagent tidak bisa lanjut tanpa klarifikasi | subagent returns, master copies |

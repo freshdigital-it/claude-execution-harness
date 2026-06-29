@@ -29,10 +29,19 @@ Policy layer over ECC muscle. Drives plan to localhost-ready without mid-run int
 | security-core | Sonnet (Opus on 2× gate fail) | high | test-first | deferred-verify |
 | business / bugfix | Sonnet | medium | test-first | auto |
 | mechanical-fan | Haiku | low | no | pipeline |
-| refactor / FE-ops | Haiku | low | no | auto |
+| refactor | Haiku | low | no | auto |
+| **fe-mechanical** | Haiku | low | no | pipeline (tsc + linter) |
+| **fe-component** | Sonnet | medium | no | conformance |
+| **fe-page** | Sonnet | medium | no | conformance + fe-journey |
+| **fe-api-wiring** | Sonnet | medium | no | auto + fixtures |
+| **fe-visual** | Sonnet | high | no | GAN K≤3 (escalation only) |
 
-Haiku for mechanical-fan/FE-ops unless the task requires architectural judgment or spans >10 files.
+`fe-mechanical`: renames, import swaps, text changes, trivial token value swaps — compiler is the oracle.
+`fe-component` through `fe-api-wiring`: failure-attribution across CSS/component/state/API → Sonnet.
+`fe-visual`: activated only when conformance gate fails on pixel fidelity. Never default.
 Opus is reserved as difficulty escalation only — never as a class default.
+
+→ `reference/fe-execution.md` for FE sub-class playbook, UX contract schema, GAN prompts, rubric.
 
 ## Lifecycle
 
@@ -73,6 +82,8 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 | `scripts/trajectory-append.sh` | Append one task trajectory row to `.harness/trajectory.jsonl` (C1) |
 | `scripts/frontier-update.sh` | Recompute learned-routing `frontier.json` from full corpus at run-end (C3) |
 | `scripts/hooks/harness-runend-guard.sh` | Stop hook — blocks stop until trajectory complete + run-report exists (C2) |
+| `scripts/ux-contract-generate.py` | **FE** Parse `design/*.html` → generate UX contract YAML drafts + `design-tokens.json` per screen |
+| `scripts/fe-server-check.sh` | **FE** Health check: Vite/FE server serving latest build (prerequisite for all FE verification) |
 
 ## Wire the hook (one-time setup per project)
 
@@ -119,7 +130,15 @@ When `/execution-harness` is invoked, master runs these in order before the firs
     - nama file/path yang tidak ada di codebase
     - env var yang tidak ada di .env.example
 
-3. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
+3a. [FE plan-time — run if plan contains any FE tasks]
+    Generate UX contracts from prototype:
+      python3 scripts/ux-contract-generate.py design/<prototype>.html --output $PROJECT_ROOT/ux-contracts/
+    Contracts go to ux-contracts/ (status: draft). Human sets status: approved before loop runs.
+    Generate design-tokens.json: already output by ux-contract-generate.py alongside contracts.
+    Generate component inventory: list components in src/components/** with prop signatures.
+    These three artifacts form the FE context bundle — injected into all FE subagent prompts.
+
+3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
    If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
    If frontier reports `downgrade_note` (Haiku cold-start warning), record it explicitly in DAG `note`.
@@ -136,7 +155,18 @@ When `/execution-harness` is invoked, master runs these in order before the firs
    | security-core | "sonnet" | "high" |
    | business / bugfix | "sonnet" | "medium" |
    | mechanical-fan | "haiku" | "low" |
-   | refactor / FE-ops | "haiku" | "low" |
+   | refactor | "haiku" | "low" |
+   | fe-mechanical | "haiku" | "low" |
+   | fe-component | "sonnet" | "medium" |
+   | fe-page | "sonnet" | "medium" |
+   | fe-api-wiring | "sonnet" | "medium" |
+   | fe-visual | "sonnet" | "high" |
+
+   For any FE sub-class (fe-*): inject FE context bundle before spawn:
+     - relevant section from approved ux-contracts/<screen>.yaml
+     - design-tokens.json (full, ~400 tok)
+     - component inventory manifest (~400 tok, generated plan-time)
+   Run fe-server-check.sh before any FE verification step.
 
    If security-core gate fails twice → escalate to model: "opus", effort: "high".
    Record escalation reason in DAG `note` field.
@@ -175,3 +205,7 @@ If a subagent returns `status: blocked`:
 - **Omitting `model:` when spawning Agent** — subagent inherits parent session model.
 - **Omitting `effort:` when spawning Agent** — subagent inherits parent session effort.
 - **Assuming instead of asking** — any ambiguity not surfaced at Step-0 or mid-run is a harness bug.
+- **Classifying all FE tasks as `refactor`** — use FE sub-classes (fe-mechanical through fe-visual). Wrong class = wrong model = Haiku trying to do failure attribution.
+- **Skipping fe-server-check.sh** — FE verification without health check is unreliable (Vite may serve stale build, producing false positives that cost iteration cycles).
+- **Running `ux-contract-generate.py` but skipping human approval** — only `status: approved` contracts enter the loop. Draft contracts are skipped silently.
+- **Screenshotting in fe-component/fe-page** — image tokens only in `fe-visual`. Text-based conformance gate first.
