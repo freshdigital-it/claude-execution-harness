@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Copy to <project_root>/deploy-config.sh.
+# Add to .gitignore if it contains credentials.
+#
+# Variables read by: scripts/deploy.sh and scripts/rollback.sh
+
+# Command to deploy to staging
+DEPLOY_STAGING_CMD=""
+
+# Command to deploy to production (runs only with --confirm)
+DEPLOY_PROD_CMD=""
+
+# HTTP 200 = healthy. Use a cheap endpoint (/api/health, /healthz)
+HEALTH_CHECK_URL="http://localhost:8080/api/health"
+
+# Revert command (optional). Git fallback used if not set.
+ROLLBACK_CMD=""

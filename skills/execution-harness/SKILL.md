@@ -48,7 +48,15 @@ Opus is reserved as difficulty escalation only — never as a class default.
 ```
 plan-time → [ambiguity check → ask user] → classify tasks → plan.dag.json → recall
 loop      → spawn typed subagent → gate → checkpoint
-post-loop → simplify pass → local-preview (isolated DB) → delivery-metrics → run-report → review-ledger
+post-loop → simplify pass → local-preview (isolated DB) → delivery-metrics
+         → qa-gate (BLOCKING, produces .harness/qa-gate.json)
+         → [deploy staging — only if GO + --deploy=staging flag]
+             → health-check → rollback if unhealthy
+         → run-report → review-ledger
+
+Production deploy: ALWAYS explicit command outside the loop.
+  scripts/deploy.sh production <project_root> --confirm
+  Never triggered automatically. Never triggered by master without user command.
 ```
 
 → `reference/lifecycle.md` for isolation details, migration workaround, deploy gate.
@@ -101,6 +109,9 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 | `scripts/phase-integration-gate.sh` | **Integration** Re-run all negative tests + Playwright journeys at phase boundary (Opus #1, BLOCKING) |
 | `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
+| `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO. Blocks deploy if NO-GO. |
+| `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project deploy-config.sh. Staging auto, production explicit. |
+| `scripts/rollback.sh` | **Rollback** Auto-triggered by deploy.sh on health check failure. Tries ROLLBACK_CMD then git fallback. |
 
 ## Wire the hook (one-time setup per project)
 
@@ -225,6 +236,19 @@ When `/execution-harness` is invoked, master runs these in order before the firs
    Both omissions break cost control. This is the #1 token-spend bug.
 ```
 
+Post-loop (master runs in sequence, after ALL tasks done):
+  1. delivery-metrics:  scripts/delivery-metrics.sh $PROJECT_ROOT
+  2. qa-gate:           scripts/qa-gate.sh $PROJECT_ROOT $PREVIEW_URL [--fast]
+     If NO-GO → surface reasons to user, halt. Fix tasks and re-run.
+     If GO    → proceed.
+  3. staging deploy (ONLY if --deploy=staging flag was set at harness invocation):
+       scripts/deploy.sh staging $PROJECT_ROOT
+     Default: skip deploy, just show GO verdict and wait for explicit deploy command.
+  4. run-report:        write .harness/run-report.md (trajectory summary + qa-gate verdict)
+
+Production deploy: explicit user command at any time after qa-gate GO.
+  scripts/deploy.sh production $PROJECT_ROOT --confirm
+
 If Step 3 already exists (resume): load it, skip pending tasks already `done`.
 
 ## Mid-run blocked tasks
@@ -260,3 +284,6 @@ If a subagent returns `status: blocked`:
 - **Giving user manual commands to run** — ALL scripts run inside the loop by master. The ONLY human action is setting `status: approved` on UX contracts. If you find yourself writing "run this command before starting," it belongs in Step 3a or Step 8, not in user-facing text.
 - **Skipping VRT baseline capture after fe-visual PASS** — master must run `fe-vrt-baseline.sh capture` automatically the first time a screen passes fe-visual. Without a baseline, every subsequent run does full GAN (expensive).
 - **Skipping phase-integration-gate.sh** — must run automatically at every phase boundary, not manually triggered. If forgotten, tasks that pass individually may break each other undetected.
+- **Deploying without qa-gate.sh** — deploy.sh requires qa-gate.json with verdict=GO. No gate = no deploy.
+- **Auto-deploying to production** — production deploy is NEVER in the loop. Always requires explicit `deploy.sh production --confirm`. Any attempt to auto-trigger it is a harness bug.
+- **Skipping rollback on health check failure** — deploy.sh calls rollback.sh automatically. Never just log the failure and leave a broken deploy in place.
