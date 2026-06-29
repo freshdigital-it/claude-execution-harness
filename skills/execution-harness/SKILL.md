@@ -147,22 +147,31 @@ When `/execution-harness` is invoked, master runs these in order before the firs
     - nama file/path yang tidak ada di codebase
     - env var yang tidak ada di .env.example
 
-3a. [FE plan-time — run if plan contains any FE tasks]
-    Step A: Generate UX contracts from prototype (CDD):
-      python3 scripts/ux-contract-generate.py design/<prototype>.html --output $PROJECT_ROOT/ux-contracts/
-    Contracts go to ux-contracts/ (status: draft). Human sets status: approved before loop runs.
-    Generate design-tokens.json: already output by ux-contract-generate.py alongside contracts.
-    Generate component inventory: list components in src/components/** with prop signatures.
-    These three artifacts form the FE context bundle — injected into all FE subagent prompts.
+3a. [FE plan-time — MASTER RUNS THIS AUTOMATICALLY when plan has any fe-* tasks]
 
-    Step B: Generate failing tests from approved contracts (ATDD — test-first for FE):
-      python3 scripts/fe-atdd-generate.py $PROJECT_ROOT/ux-contracts/ \
-        --output $PROJECT_ROOT/tests/e2e/ux-contracts/
-      python3 scripts/fe-behavior-test-generate.py $PROJECT_ROOT/ux-contracts/ \
-        --output $PROJECT_ROOT/tests/unit/ux-contracts/
-    Tests are FAILING before implementation. Subagent's job: make them green.
-    Inject test file paths into subagent context alongside contract YAML.
-    This is ATDD (acceptance test written first) + Testing Trophy (behavior tests for components).
+    STEP A (master, no user action needed):
+      Bash: python3 ~/.claude/skills/execution-harness/scripts/ux-contract-generate.py \
+        "$PROJECT_ROOT"/design/*.html --output "$PROJECT_ROOT/ux-contracts/"
+      → produces ux-contracts/<screen>.yaml (status: draft) + design-tokens.json
+      Also build component inventory:
+        find "$PROJECT_ROOT/src/components" -name "*.vue" | head -50
+      If no design/*.html exists: generate minimal contract stubs from plan spec,
+      set status: draft — user can approve after reviewing.
+
+    STEP B (ONE human gate — the only user pause in the FE loop):
+      Master shows user:
+        "[N] UX contract drafts at ux-contracts/. Review dan set status: approved
+        untuk screen yang akan diimplementasi. Ketik 'lanjut' setelah selesai."
+      Loop WAITS until user responds. This is the only time user touches contracts.
+
+    STEP C (master, immediately after user responds — no user action):
+      Bash: python3 ~/.claude/skills/execution-harness/scripts/fe-atdd-generate.py \
+        "$PROJECT_ROOT/ux-contracts/" --output "$PROJECT_ROOT/tests/e2e/ux-contracts/"
+      Bash: python3 ~/.claude/skills/execution-harness/scripts/fe-behavior-test-generate.py \
+        "$PROJECT_ROOT/ux-contracts/" --output "$PROJECT_ROOT/tests/unit/ux-contracts/"
+      → All generated tests FAIL (no implementation yet). This is intentional.
+      → Master stores test file paths in each task's DAG fe_contract field.
+      User does NOT run any of these — master injects them into subagent context at loop time.
 
 3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.
@@ -192,7 +201,20 @@ When `/execution-harness` is invoked, master runs these in order before the firs
      - relevant section from approved ux-contracts/<screen>.yaml
      - design-tokens.json (full, ~400 tok)
      - component inventory manifest (~400 tok, generated plan-time)
-   Run fe-server-check.sh before any FE verification step.
+     - failing Playwright test: tests/e2e/ux-contracts/<screen>.spec.ts
+     - failing behavior test: tests/unit/ux-contracts/<screen>.test.ts
+     - instruction: "Tests are currently FAILING. Make them pass. Do not modify test files."
+   Before any FE verification step (master, not subagent):
+     Bash: ~/.claude/skills/execution-harness/scripts/fe-server-check.sh $PREVIEW_URL
+     Exit 1 → rebuild + retry 1x before spawning evaluator.
+   After fe-visual PASS — first time for a given screen (master, automatic):
+     Bash: ~/.claude/skills/execution-harness/scripts/fe-vrt-baseline.sh capture \
+       $PREVIEW_URL <route> <screen_id> --harness-dir "$PROJECT_ROOT/.harness"
+     Subsequent fe-visual runs: run diff first. If diff PASS → skip GAN evaluator entirely.
+   At each phase boundary (master, automatic, BLOCKING):
+     Bash: ~/.claude/skills/execution-harness/scripts/phase-integration-gate.sh \
+       $PROJECT_ROOT $PREVIEW_URL --phase <phase-name>
+     Exit 1 → halt loop, surface to user. Not WARN-only.
 
    If security-core gate fails twice → escalate to model: "opus", effort: "high".
    Record escalation reason in DAG `note` field.
@@ -235,3 +257,6 @@ If a subagent returns `status: blocked`:
 - **Skipping fe-server-check.sh** — FE verification without health check is unreliable (Vite may serve stale build, producing false positives that cost iteration cycles).
 - **Running `ux-contract-generate.py` but skipping human approval** — only `status: approved` contracts enter the loop. Draft contracts are skipped silently.
 - **Screenshotting in fe-component/fe-page** — image tokens only in `fe-visual`. Text-based conformance gate first.
+- **Giving user manual commands to run** — ALL scripts run inside the loop by master. The ONLY human action is setting `status: approved` on UX contracts. If you find yourself writing "run this command before starting," it belongs in Step 3a or Step 8, not in user-facing text.
+- **Skipping VRT baseline capture after fe-visual PASS** — master must run `fe-vrt-baseline.sh capture` automatically the first time a screen passes fe-visual. Without a baseline, every subsequent run does full GAN (expensive).
+- **Skipping phase-integration-gate.sh** — must run automatically at every phase boundary, not manually triggered. If forgotten, tasks that pass individually may break each other undetected.

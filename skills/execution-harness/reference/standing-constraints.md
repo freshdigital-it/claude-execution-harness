@@ -70,12 +70,17 @@ Berlaku untuk master DAN semua subagent.
 | mechanical-fan | Haiku | low | no test-first — compiler + linter IS the test |
 | refactor | Haiku | low | no test-first |
 | fe-mechanical | Haiku | low | no test-first — tsc + linter IS the oracle |
-| fe-component | Sonnet | medium | no test-first — conformance gate IS the oracle |
-| fe-page | Sonnet | medium | no test-first — conformance + journey gate IS the oracle |
-| fe-api-wiring | Sonnet | medium | no test-first — Playwright fixtures IS the oracle |
-| fe-visual | Sonnet | high | no test-first — GAN evaluator IS the oracle |
+| fe-component | Sonnet | medium | **ATDD** — behavior tests pre-generated from contract. Gate = behavior tests pass + conformance ≥12/14 |
+| fe-page | Sonnet | medium | **ATDD** — Playwright tests pre-generated from contract. Gate = journey tests pass + conformance |
+| fe-api-wiring | Sonnet | medium | **ATDD** — Playwright tests pre-generated from contract. Gate = journey tests pass + fixtures |
+| fe-visual | Sonnet | high | VRT diff first (cheap). GAN only if diff FAIL. Baseline auto-captured on first PASS. |
 
-FE sub-class prerequisite: **fe-server-check.sh must pass** before any FE gate runs.
+FE sub-class prerequisites — master runs ALL of these, user runs NONE:
+- Plan-time: `ux-contract-generate.py` → user approves → `fe-atdd-generate.py` + `fe-behavior-test-generate.py`
+- Before any verification: `fe-server-check.sh` must exit 0
+- After fe-visual PASS (first time per screen): `fe-vrt-baseline.sh capture`
+- At phase boundary: `phase-integration-gate.sh` (BLOCKING)
+
 Conformance gate tests against approved `ux-contracts/<screen>.yaml`. Gate fails if rubric score < 12/14.
 Screenshot / image tokens: ONLY in `fe-visual`. Never in `fe-mechanical` through `fe-api-wiring`.
 
