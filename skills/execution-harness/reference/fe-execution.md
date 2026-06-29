@@ -2,6 +2,28 @@
 
 Panduan eksekusi task Frontend di harness. Dibaca oleh master dan diinjeksikan ke subagent FE.
 
+## Testing Model: ATDD + CDD + Testing Trophy
+
+TDD klasik (unit-test-first) tidak cocok untuk FE. Model yang dipakai:
+
+| Layer | Pendekatan | Tool | Kapan |
+|---|---|---|---|
+| Static | TypeScript strict + ESLint | tsc, eslint | Setiap commit |
+| Integration/Behavior | Testing Trophy — find by role | Vue Test Utils | `fe-component` gate |
+| Acceptance | ATDD — test ditulis DULU (failing) | Playwright | `fe-page`, `fe-api-wiring` |
+| Visual Regression | VRT baseline + diff | Playwright screenshot | `fe-visual` (escalation only) |
+| Component spec | CDD — states per screen = contract | UX contract YAML | Plan-time |
+
+**Urutan eksekusi (bukan implement-dulu-test-kemudian):**
+```
+Plan-time: approved contract → fe-atdd-generate.py → Playwright tests FAIL
+                             → fe-behavior-test-generate.py → Vue Tests FAIL
+Loop:      subagent menerima failing tests → tugasnya: make them green
+           gate: run tests → PASS atau localized delta FAIL
+```
+
+---
+
 ---
 
 ## FE Sub-classes
@@ -205,6 +227,73 @@ Subagent yang terima `selector + issue + expected + got + fix_hint` konvergen da
 
 ---
 
+## Visual Regression Testing (VRT) — Gap 2 Fix
+
+VRT mencegah pixel drift di antara run. Baseline disimpan setelah `fe-visual` PASS pertama kali.
+
+### Capture baseline (pertama kali)
+```bash
+scripts/fe-vrt-baseline.sh capture http://localhost:5173 /invoice-list invoice-list \
+  --harness-dir $PROJECT_ROOT/.harness
+```
+Menyimpan screenshot ke `.harness/vrt-baselines/invoice-list.png`.
+
+### Diff pada run berikutnya
+```bash
+scripts/fe-vrt-baseline.sh diff http://localhost:5173 /invoice-list invoice-list \
+  --threshold 5 --harness-dir $PROJECT_ROOT/.harness
+# Exit 0 = PASS (diff ≤ 5%)
+# Exit 1 = FAIL (regression detected, diff image saved to .harness/vrt-diffs/)
+# Exit 2 = no baseline yet (run capture first)
+```
+
+### Kapan VRT jalan
+- `fe-visual` PASS pertama → otomatis capture baseline
+- `fe-visual` run berikutnya → diff dulu sebelum GAN evaluator (lebih murah)
+- Jika diff PASS → skip GAN evaluator, langsung done
+- Jika diff FAIL → jalankan GAN evaluator untuk localized delta
+
+### Baseline regeneration
+Jika prototype berubah (UX contract di-update): delete baseline lama dan capture ulang.
+```bash
+rm .harness/vrt-baselines/<screen_id>.png
+scripts/fe-vrt-baseline.sh capture ...
+```
+Baseline bukan permanen — ia adalah frozen visual contract untuk versi prototype tertentu.
+
+---
+
+## Testing Trophy: Behavior Tests (Gap 3 Fix)
+
+Untuk `fe-component`: gate tidak hanya CSS conformance, tapi juga behavior test.
+
+### Generated behavior tests (Vue Test Utils)
+```bash
+# Plan-time: generate behavior test stubs dari approved contract
+python3 scripts/fe-behavior-test-generate.py ux-contracts/ --output tests/unit/ux-contracts/
+```
+
+### Prinsip Testing Trophy yang diterapkan
+- **Find by role/label** — bukan CSS class atau component internals
+  ```typescript
+  // WRONG (Testing Trophy violation)
+  wrapper.find('.btn-create-invoice')
+  // CORRECT
+  wrapper.find('[role="button"]').filter(b => /buat invoice/i.test(b.text()))
+  ```
+- **Test behavior**, bukan implementation — apakah CTA muncul saat empty, apakah error ada role=alert
+- **Test states** (loading/empty/error/data) sebagai props/mocks, bukan DOM inspection
+- **No snapshot testing** — snapshots test implementation, bukan behavior
+
+### Integrasi ke conformance gate
+`fe-component` gate sekarang = CSS token check + DOM diff + behavior tests (Vitest):
+```bash
+vitest run tests/unit/ux-contracts/<screen>.test.ts
+```
+Harus PASS sebelum task dianggap done.
+
+---
+
 ## GAN Loop untuk FE (Recovery Path)
 
 Aktifkan **hanya** ketika conformance gate gagal 1x pada pixel fidelity. Bukan default.
@@ -254,15 +343,21 @@ K=3 GAN failure hampir selalu berarti ada design decision yang belum ada di cont
 
 Diinjeksikan ke setiap FE subagent saat spawn. Hard budget: ≤1,500 tokens.
 
-### Required (~1,350 tok)
+### Required (~1,800 tok)
 
 | Konten | Token est. | Cara dapat |
 |---|---|---|
 | `design-tokens.json` (extracted plan-time) | ~400 | `scripts/ux-contract-generate.py --tokens-only` |
 | UX contract section yang relevan | ~300 | `ux-contracts/<screen>.yaml` (hanya states + journeys task ini) |
-| Component inventory manifest | ~400 | Generated plan-time dari `src/components/` |
-| Store conventions (1 skeleton pattern) | ~200 | Extract dari standing-constraints atau template |
+| **Failing Playwright test file** (ATDD) | ~400 | `tests/e2e/ux-contracts/<screen>.spec.ts` (generated plan-time) |
+| **Failing Vue behavior test file** (Trophy) | ~300 | `tests/unit/ux-contracts/<screen>.test.ts` (generated plan-time) |
+| Component inventory manifest | ~200 | Generated plan-time dari `src/components/` |
 | Verify recipe untuk sub-class ini | ~50 | Dari table sub-classes di atas |
+
+**Instruksi ke subagent yang wajib disertakan:**
+> "Tests di `tests/e2e/ux-contracts/<screen>.spec.ts` dan `tests/unit/ux-contracts/<screen>.test.ts`
+> saat ini FAILING. Tugasmu: implementasi komponen sehingga semua test PASS.
+> Jangan modifikasi test files — modifikasi source code saja."
 
 ### Optional (pull on demand, jangan push)
 

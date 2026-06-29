@@ -48,16 +48,26 @@ Opus is reserved as difficulty escalation only — never as a class default.
 ```
 plan-time → [ambiguity check → ask user] → classify tasks → plan.dag.json → recall
 loop      → spawn typed subagent → gate → checkpoint
-post-loop → simplify pass → local-preview (isolated DB) → run-report → review-ledger
+post-loop → simplify pass → local-preview (isolated DB) → delivery-metrics → run-report → review-ledger
 ```
 
 → `reference/lifecycle.md` for isolation details, migration workaround, deploy gate.
 
 ## Deferred review (no mid-run interruption)
 
-security-core → independent verifier (≠ implementer instance, Sonnet, negative tests, security-scan) → commit → append to `review-ledger.md`. Human reads ledger **once** at end, not per-task.
+security-core gate = **Sub-step A** (SAST/SCA via `scripts/security-scan.sh`, zero LLM tokens) → **Sub-step B** (adversarial Sonnet verifier, negative tests) → commit → append to `review-ledger.md`.
+Human reads ledger **once** at end, not per-task.
 
-Verifier uses Sonnet (same tier as implementer, different instance). Escalate verifier to Opus only if implementer already used Opus AND gate failed once.
+Verifier escalates to Opus only if implementer already used Opus AND gate failed once.
+
+## Phase integration gate (BLOCKING — Opus #1)
+
+After completing a phase (group of tasks), before starting the next:
+```bash
+scripts/phase-integration-gate.sh $PROJECT_ROOT $PREVIEW_URL --phase <phase-name>
+```
+Re-runs ALL security-core negative tests + ALL Playwright journey specs in `tests/e2e/ux-contracts/`.
+Exit 1 → loop halts. Not WARN — this is a hard gate. Fixes the "tasks verified in isolation break each other" gap.
 
 ## Autonomy guards
 
@@ -83,7 +93,14 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 | `scripts/frontier-update.sh` | Recompute learned-routing `frontier.json` from full corpus at run-end (C3) |
 | `scripts/hooks/harness-runend-guard.sh` | Stop hook — blocks stop until trajectory complete + run-report exists (C2) |
 | `scripts/ux-contract-generate.py` | **FE** Parse `design/*.html` → generate UX contract YAML drafts + `design-tokens.json` per screen |
+| `scripts/fe-atdd-generate.py` | **FE/ATDD** Generate failing Playwright tests from approved UX contract (ATDD gap fix) |
+| `scripts/fe-behavior-test-generate.py` | **FE/Trophy** Generate Vue Test Utils behavior tests — find by role, not class (Testing Trophy gap fix) |
+| `scripts/fe-vrt-baseline.sh` | **FE/VRT** Visual regression baseline capture + diff (Gap 2: no VRT baseline) |
 | `scripts/fe-server-check.sh` | **FE** Health check: Vite/FE server serving latest build (prerequisite for all FE verification) |
+| `scripts/security-scan.sh` | **Security** SAST (semgrep) + SCA (npm audit/govulncheck) — zero LLM tokens, runs per security-core task |
+| `scripts/phase-integration-gate.sh` | **Integration** Re-run all negative tests + Playwright journeys at phase boundary (Opus #1, BLOCKING) |
+| `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
+| `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
 
 ## Wire the hook (one-time setup per project)
 
@@ -131,12 +148,21 @@ When `/execution-harness` is invoked, master runs these in order before the firs
     - env var yang tidak ada di .env.example
 
 3a. [FE plan-time — run if plan contains any FE tasks]
-    Generate UX contracts from prototype:
+    Step A: Generate UX contracts from prototype (CDD):
       python3 scripts/ux-contract-generate.py design/<prototype>.html --output $PROJECT_ROOT/ux-contracts/
     Contracts go to ux-contracts/ (status: draft). Human sets status: approved before loop runs.
     Generate design-tokens.json: already output by ux-contract-generate.py alongside contracts.
     Generate component inventory: list components in src/components/** with prop signatures.
     These three artifacts form the FE context bundle — injected into all FE subagent prompts.
+
+    Step B: Generate failing tests from approved contracts (ATDD — test-first for FE):
+      python3 scripts/fe-atdd-generate.py $PROJECT_ROOT/ux-contracts/ \
+        --output $PROJECT_ROOT/tests/e2e/ux-contracts/
+      python3 scripts/fe-behavior-test-generate.py $PROJECT_ROOT/ux-contracts/ \
+        --output $PROJECT_ROOT/tests/unit/ux-contracts/
+    Tests are FAILING before implementation. Subagent's job: make them green.
+    Inject test file paths into subagent context alongside contract YAML.
+    This is ATDD (acceptance test written first) + Testing Trophy (behavior tests for components).
 
 3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending).
    For each class, consult `scripts/frontier-route.sh "$PROJECT_ROOT/.harness" <class>`.

@@ -2,10 +2,18 @@
 
 ## Budget ceiling
 
-Set before run: `HARNESS_TOKEN_BUDGET=200000` (tokens).
+Set before run: `HARNESS_TOKEN_CEILING=200000` (tokens, env var for hook).
 Master checks `/context-budget` at each phase gate. At ceiling → checkpoint + halt + run-report.
 
-**Current status: SOFT enforcement** — instructed stop, no hard kill mechanism. There is no automatic process termination today. A PostToolUse hook checking token counters would make this hard; not yet built. Treat as disciplined self-monitoring, not a circuit breaker. The failure-breaker (K=3) is the real backstop.
+**HARD enforcement via PostToolUse hook** (`scripts/hooks/posttooluse-token-ceiling.sh`).
+Wire in project `.claude/settings.json`:
+```json
+"PostToolUse": [{ "hooks": [{ "type": "command",
+  "command": "HARNESS_TOKEN_CEILING=300000 ~/.claude/skills/execution-harness/scripts/hooks/posttooluse-token-ceiling.sh"
+}] }]
+```
+Hook sums `tokens_est` from `trajectory.jsonl` for current `RUN_ID`. At ceiling: writes `.harness/ceiling-breached` flag, exits 2 → Claude Code surfaces and halts. Warns at 80%.
+The failure-breaker (K=3) remains the real backstop for task-level runaway.
 
 ## Failure-breaker
 
@@ -44,13 +52,22 @@ parent session defaults — if master runs on Opus at default effort, all subage
 
 ## Deferred review — adversarial verifier contract
 
-Security verifier is NOT a blessing pass. The verifier prompt MUST:
+Security verifier is NOT a blessing pass. The verifier gate has two sub-steps:
 
-1. **Adversarial framing**: *"Attempt to break this implementation. Try cross-tenant access, privilege escalation, and boundary violations. Default to `REFUTED` unless you are certain the constraint holds under all inputs."*
-2. **Different model** from the implementer — prevents confirmation bias. Use the next tier up from
-   the implementer: Sonnet implementer → Sonnet verifier (different instance); Haiku implementer
-   → Sonnet verifier. Opus is only needed if the implementer already used Opus and gate failed once.
-3. **Negative tests mandatory**: at minimum — cross-tenant read, escalation attempt, invalid token/scope.
+### Sub-step A: SAST + SCA scan (zero LLM tokens)
+Run `scripts/security-scan.sh <project_root> --changed-only` before spawning the LLM verifier.
+- HIGH/CRITICAL findings → task does not proceed to LLM verifier → BLOCKED immediately.
+- No tools available → WARN, log, proceed to LLM verifier (partial coverage disclosed).
+- Tool: semgrep (SAST) + govulncheck / npm audit / pip-audit (SCA, by stack).
+- Coverage: secrets, injection patterns, insecure deserialization, known CVEs in dependencies.
+- This step costs ZERO LLM tokens — run it every security-core task without hesitation.
+
+### Sub-step B: LLM adversarial verifier (~80k tokens, Sonnet)
+Only runs after Sub-step A passes. Verifier prompt MUST:
+
+1. **Adversarial framing**: *"Attempt to break this implementation. Try cross-tenant access, privilege escalation, injection, and boundary violations. Default to `REFUTED` unless you are certain the constraint holds under all inputs."*
+2. **Different model** from implementer (different instance prevents confirmation bias). Sonnet implementer → Sonnet verifier. Haiku implementer → Sonnet verifier. Opus only if implementer used Opus AND gate failed once.
+3. **Negative tests mandatory**: cross-tenant read, privilege escalation, invalid token/scope, injection attempt (SQL / path traversal), secrets-in-response check.
 4. **Return contract**: `{verdict: APPROVED|NEEDS_REVIEW|BLOCKED, findings: [{issue, severity, proof}], confidence: high|medium|low}`.
 
 Verdict meanings:
