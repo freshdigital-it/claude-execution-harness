@@ -1,17 +1,17 @@
 ---
 name: execution-harness
-description: "Hands-off coding executor: one command → build → evaluate → localhost ready. Master controller, ephemeral ECC subagents, durable plan.dag.json state, deferred security review, local-preview isolation. Use for multi-task plans, production launches, or large coding workstreams."
+description: "End-to-end executor: one sentence → PRD → Spec → Plan → implement → QA → GitHub PR + staging deploy. No manual steps, no assumptions. Master controller with interactive planning, typed subagents, durable DAG, and CI-integrated delivery."
 user-invokable: true
 ---
 
 # Execution Harness
 
-Policy layer over ECC muscle. Drives plan to localhost-ready without mid-run interruptions.
+From idea to GitHub PR. One command. No assumptions. No bolak-balik.
 
 ## Activate when
 
-- Executing a multi-task plan (`docs/**/plans/*.md`).
-- Production launch or large workstream spanning backend, frontend, security, ops.
+- Any feature, bugfix, or workstream — from one-liner idea OR existing plan file.
+- When you need PRD + Spec + Plan generated before implementation.
 - Any job too big for one context window that needs one controller.
 
 ## Three invariants (non-negotiable)
@@ -46,17 +46,27 @@ Opus is reserved as difficulty escalation only — never as a class default.
 ## Lifecycle
 
 ```
-plan-time → [ambiguity check → ask user] → classify tasks → plan.dag.json → recall
-loop      → spawn typed subagent → gate → checkpoint
-post-loop → simplify pass → local-preview (isolated DB) → delivery-metrics
-         → qa-gate (BLOCKING, produces .harness/qa-gate.json)
-         → [deploy staging — only if GO + --deploy=staging flag]
-             → health-check → rollback if unhealthy
-         → run-report → review-ledger
+PHASE 0: Planning (interactive — no assumptions)
+  → detect existing PRD/Spec/Plan → ask: resume / restart / buat baru
+  → fresh: batch questions → PRD (approve) → Spec (approve) → Plan (approve)
+  → HARD GATE: Phase 1 tidak dimulai sampai Plan di-approve user
 
-Production deploy: ALWAYS explicit command outside the loop.
-  scripts/deploy.sh production <project_root> --confirm
-  Never triggered automatically. Never triggered by master without user command.
+PHASE 1: Implementation
+  → classify tasks → plan.dag.json → recall patterns
+  → loop: spawn typed subagent → gate → checkpoint
+  → [at phase boundary]: phase-integration-gate (BLOCKING)
+
+PHASE 2: Quality
+  → delivery-metrics → qa-gate (GO/NO-GO, BLOCKING)
+
+PHASE 3: Delivery
+  → git branch + commit + push
+  → gh pr create (body: qa-gate verdict + security summary + test results)
+  → CI (harness-generated workflow) auto-deploys staging on PR open
+  → Production: ALWAYS explicit — gh workflow run deploy-production (never in loop)
+```
+
+→ `reference/planning.md` for Phase 0 question protocol, PRD/Spec/Plan schemas, approval gates.
 ```
 
 → `reference/lifecycle.md` for isolation details, migration workaround, deploy gate.
@@ -109,9 +119,10 @@ Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model
 | `scripts/phase-integration-gate.sh` | **Integration** Re-run all negative tests + Playwright journeys at phase boundary (Opus #1, BLOCKING) |
 | `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
-| `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO. Blocks deploy if NO-GO. |
-| `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project deploy-config.sh. Staging auto, production explicit. |
-| `scripts/rollback.sh` | **Rollback** Auto-triggered by deploy.sh on health check failure. Tries ROLLBACK_CMD then git fallback. |
+| `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO before PR/deploy. |
+| `scripts/ci-generate.sh` | **CI** Generate `.github/workflows/harness-ci.yml` — runs harness scripts in CI, auto-deploys staging on PR. |
+| `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project `deploy-config.sh`. Staging auto, production explicit. |
+| `scripts/rollback.sh` | **Rollback** Auto-triggered by `deploy.sh` on health check failure. |
 
 ## Wire the hook (one-time setup per project)
 
@@ -127,9 +138,37 @@ Add to project `.claude/settings.json`:
 }
 ```
 
+## Phase 0: Planning (runs before Step-0 if no approved plan exists)
+
+```
+P0a. Detect existing artifacts:
+     find docs/prds/ docs/specs/ docs/plans/ -name "*.md" 2>/dev/null | sort -r | head -10
+
+P0b. If found → surface to user + ask: A (resume) / B (restart) / C (buat baru)
+     A → skip to Step-0 with existing plan
+     B → skip to Step-0, reset all task status → pending
+     C → proceed to P0c
+
+P0c. PRD generation (no plan at all, OR user chose C):
+     Ask BATCH 1 + BATCH 2 in ONE message (see reference/planning.md for exact questions).
+     Wait for all 10 answers. Generate PRD. Show draft. Wait for 'approved'.
+     Save: docs/prds/YYYY-MM-DD-<feature>.md (status: approved)
+
+P0d. Spec generation (after PRD approved):
+     Ask Spec questions in ONE message (5 questions). Generate Spec. Wait for 'approved'.
+     Save: docs/specs/YYYY-MM-DD-<feature>.md (status: approved)
+
+P0e. Plan generation (after Spec approved):
+     Generate plan (writing-plans protocol). Show task classification preview + token estimate.
+     Wait for user to type 'mulai'. Save: docs/plans/YYYY-MM-DD-<feature>.md
+
+→ HARD GATE: Phase 1 TIDAK dimulai sampai user confirm plan.
+→ full question protocol + document schemas: reference/planning.md
+```
+
 ## Step-0: execution opening moves
 
-When `/execution-harness` is invoked, master runs these in order before the first task:
+When plan is confirmed (Phase 0 complete or plan already existed), master runs:
 
 ```
 1. Read plan file (offset/limit — never whole file at once)
@@ -236,18 +275,59 @@ When `/execution-harness` is invoked, master runs these in order before the firs
    Both omissions break cost control. This is the #1 token-spend bug.
 ```
 
-Post-loop (master runs in sequence, after ALL tasks done):
+Post-loop — Phase 2 + Phase 3 (master runs in sequence):
+
+  PHASE 2: Quality
   1. delivery-metrics:  scripts/delivery-metrics.sh $PROJECT_ROOT
   2. qa-gate:           scripts/qa-gate.sh $PROJECT_ROOT $PREVIEW_URL [--fast]
-     If NO-GO → surface reasons to user, halt. Fix tasks and re-run.
-     If GO    → proceed.
-  3. staging deploy (ONLY if --deploy=staging flag was set at harness invocation):
-       scripts/deploy.sh staging $PROJECT_ROOT
-     Default: skip deploy, just show GO verdict and wait for explicit deploy command.
-  4. run-report:        write .harness/run-report.md (trajectory summary + qa-gate verdict)
+     NO-GO → surface reasons, halt. User fixes tasks, re-run.
+     GO    → proceed to Phase 3.
 
-Production deploy: explicit user command at any time after qa-gate GO.
-  scripts/deploy.sh production $PROJECT_ROOT --confirm
+  PHASE 3: Delivery (automatic after GO)
+  3. git checkout -b feature/<kebab-feature-name>
+     git add -A && git commit -m "feat: <feature name from PRD>"
+     git push -u origin HEAD
+
+  4. gh pr create with body:
+     ```
+     gh pr create \
+       --title "<feature name>" \
+       --body "$(cat <<'EOF'
+     ## Summary
+     [1-3 bullet points from plan.dag.json done tasks]
+
+     ## QA Gate: GO ✓
+     $(cat .harness/qa-gate.json | python3 -c "
+     import json,sys
+     d=json.load(sys.stdin)
+     for c in d['checks']:
+         icon = '✓' if c['status']=='PASS' else ('~' if c['status']=='SKIP' else '✗')
+         print(f\"- {icon} {c['check']}: {c['detail']}\")
+     ")
+
+     ## Security Review
+     [Summary from review-ledger.md — approved/needs-review count]
+
+     ## Test Coverage
+     - ATDD (Playwright): [N tests, all pass]
+     - Behavior (Vitest): [N tests, all pass]
+     - VRT: [N screens, no regression]
+
+     🤖 Generated with execution-harness
+     EOF
+     )"
+     ```
+
+  5. run-report: write .harness/run-report.md (trajectory + qa-gate + PR URL)
+
+  CI (from .github/workflows/harness-ci.yml, generated by harness) automatically:
+  - Runs qa-gate.sh --fast on PR
+  - Posts qa-gate results as PR comment
+  - Deploys to staging on PR open
+  - Posts staging URL as PR comment
+
+  Production: NEVER automatic.
+  Trigger via: gh workflow run deploy-production --field confirm=true
 
 If Step 3 already exists (resume): load it, skip pending tasks already `done`.
 
@@ -281,6 +361,10 @@ If a subagent returns `status: blocked`:
 - **Skipping fe-server-check.sh** — FE verification without health check is unreliable (Vite may serve stale build, producing false positives that cost iteration cycles).
 - **Running `ux-contract-generate.py` but skipping human approval** — only `status: approved` contracts enter the loop. Draft contracts are skipped silently.
 - **Screenshotting in fe-component/fe-page** — image tokens only in `fe-visual`. Text-based conformance gate first.
+- **Skip Phase 0 karena "plan sudah ada di kepala"** — tanpa PRD/Spec/Plan yang di-approve, tidak ada SSOT. Subagent akan buat asumsi berbeda-beda.
+- **Tanya satu pertanyaan sekaligus di Phase 0** — batch semua pertanyaan dalam satu pesan.
+- **Generate Spec sebelum PRD di-approve** — urutan wajib: PRD → approve → Spec → approve → Plan → approve → Phase 1.
+- **Asumsikan scope dari nama feature** — "build payment" bisa berarti 10 hal berbeda. Tanya.
 - **Giving user manual commands to run** — ALL scripts run inside the loop by master. The ONLY human action is setting `status: approved` on UX contracts. If you find yourself writing "run this command before starting," it belongs in Step 3a or Step 8, not in user-facing text.
 - **Skipping VRT baseline capture after fe-visual PASS** — master must run `fe-vrt-baseline.sh capture` automatically the first time a screen passes fe-visual. Without a baseline, every subsequent run does full GAN (expensive).
 - **Skipping phase-integration-gate.sh** — must run automatically at every phase boundary, not manually triggered. If forgotten, tasks that pass individually may break each other undetected.
