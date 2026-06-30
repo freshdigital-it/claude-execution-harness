@@ -159,8 +159,10 @@ EOF
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
 | `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO before PR/deploy. |
 | `scripts/parallel-group-plan.py` | **Parallel** Build parallel execution groups from plan.dag.json — groups tasks with disjoint files_touched + no DAG deps. |
-| `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree for one agent + register file claims (conflict detection). |
+| `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree + register file claims + install `.harness-write.sh` in worktree. |
 | `scripts/worktree-teardown.sh` | **Parallel** Copy agent output to main project + commit (serialized) + remove worktree + release claims. |
+| `scripts/agent-result-write.sh` | **Parallel** Agent calls this when done — writes durable result file master polls for completion. |
+| `scripts/parallel-wait.sh` | **Parallel** Poll `.harness/agent-results/` for completion — timeout-safe, notification-independent. |
 | `scripts/ci-generate.sh` | **CI** Generate `.github/workflows/harness-ci.yml` — runs harness scripts in CI, auto-deploys staging on PR. |
 | `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project `deploy-config.sh`. Staging auto, production explicit. |
 | `scripts/rollback.sh` | **Rollback** Auto-triggered by `deploy.sh` on health check failure. |
@@ -421,18 +423,37 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
           - For fe-* tasks: ux-contract YAML + design-tokens.json + failing test paths
           - CRITICAL INSTRUCTION injected into every parallel agent prompt:
             "Your isolated working directory is: $WPATH
-             ALL file operations MUST use absolute paths starting with $WPATH/
-             Do NOT read or write files outside $WPATH/
+             ALL project file operations MUST use absolute paths under $WPATH/
+             Do NOT read or write project files outside $WPATH/
              Do NOT run any git commands (add, commit, push, checkout).
-             When done, return: {gate_result, files_changed_actual: [...], summary}"
+
+             When your work is complete and gate is checked, write your result:
+               bash $WPATH/.harness-write.sh \
+                 '$PROJECT_ROOT' '$TASK_ID' '<PASS|FAIL|BLOCKED>' \
+                 '<json_array_of_files_changed>' \
+                 '<one_line_summary>'
+             This is MANDATORY — master polls this file for completion.
+             Write it even if gate FAIL or BLOCKED.
+             Then return normally."
 
        c. Spawn Agent(model=<from table>, effort=<from table>, prompt=<above>)
 
      ── WAIT PHASE ──────────────────────────────────────────────────────
-     Wait for ALL agents in this group to return.
+     # Do NOT rely solely on agent return notifications — they can be lost
+     # due to context compaction, hook interference, or parallel race conditions.
+     # Poll durable result files instead. Notifications are a bonus, not a guarantee.
+
+     bash ~/.claude/skills/execution-harness/scripts/parallel-wait.sh \
+       "$PROJECT_ROOT" 600 "$GROUP_ID" <task_ids in group...>
+
+     # Polls .harness/agent-results/<task_id>.json every 5s (up to 600s).
+     # Exit 0: all done. Read each result file for gate_result + files_changed_actual.
+     # Exit 1: timeout. Read .harness/parallel-wait-<group_id>.json:
+     #   {completed:[...], timed_out:[...], elapsed_seconds: N}
+     #   Surface timed-out tasks to user: re-run, extend timeout, or skip.
 
      ── CONFLICT CHECK (safety net) ─────────────────────────────────────
-     Collect files_changed_actual from all agent results.
+     Collect files_changed_actual from .harness/agent-results/<task_id>.json.
      If any two agents report touching the same file:
        HALT. Surface conflict to user. Do not commit either task.
        User decides: re-run one sequentially, or merge manually.
@@ -581,3 +602,6 @@ If a subagent returns `status: blocked`:
 - **Skipping branch existence check** — on resume, `git checkout -b` fails if branch exists. Always: `git show-ref --verify` → checkout if exists, create if not.
 - **Skipping guard against main/master** — if branch creation silently fails, per-task commits land directly on main. Always verify `git branch --show-current` after P0f before any implementation.
 - **Leaving worktrees after crash** — if harness crashes mid-run, stale worktrees accumulate in /tmp. Run `git worktree list` and `git worktree remove --force` on cleanup.
+- **Relying solely on agent notifications for completion** — notifications can be lost (context compaction, hook interference, parallel race). Always poll `.harness/agent-results/<task_id>.json` via `parallel-wait.sh`. Result files are the source of truth.
+- **Agent not writing result file** — every parallel agent MUST call `.harness-write.sh` before returning, even on FAIL or BLOCKED. Without it, `parallel-wait.sh` will timeout waiting indefinitely.
+- **Master blocking on notification with no timeout** — always use `parallel-wait.sh` with an explicit timeout. Without it, a stalled agent makes the entire group hang forever.

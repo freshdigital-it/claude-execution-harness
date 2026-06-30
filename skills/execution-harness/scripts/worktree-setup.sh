@@ -66,4 +66,10 @@ COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 log "Creating worktree at $WORKTREE_PATH (detached @ ${COMMIT:0:8})"
 git -C "$PROJECT_ROOT" worktree add --detach "$WORKTREE_PATH" "$COMMIT"
 
+# Copy agent-result-write.sh into worktree so agent can call it without knowing harness path
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cp "$SCRIPT_DIR/agent-result-write.sh" "$WORKTREE_PATH/.harness-write.sh"
+chmod +x "$WORKTREE_PATH/.harness-write.sh"
+log "Installed .harness-write.sh in worktree"
+
 echo "$WORKTREE_PATH"
