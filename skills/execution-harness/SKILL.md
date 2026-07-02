@@ -96,7 +96,16 @@ Exit 1 → loop halts. Not WARN — this is a hard gate. Fixes the "tasks verifi
 
 Budget ceiling → failure-breaker (K=3 → `/harness-audit` → halt) → model escalation (DIFFICULTY only after 2× fail, never rate-limit) → stop-on-destructive.
 
-→ `reference/autonomy.md` for full guard specs + model+effort routing table.
+→ `reference/autonomy.md` for full guard specs + model+effort routing table + verification model policy + multimodal/browser routing.
+
+## Multimodal & browser routing (quick rule)
+
+Vision/browser I/O = Sonnet tier, never burn Opus/Fable on it:
+- **Image extraction** (user sends an image) → always Sonnet. Not overridable.
+- **Screenshot / web surf** → Sonnet by default; only "pakai opus" (or `HARNESS_BROWSER_MODEL=opus`) upgrades it.
+- **Master on Opus/Fable needs a screenshot/vision op** → summon a Sonnet sub-agent for that op, don't do it inline.
+
+→ full rules: `reference/autonomy.md` § Multimodal & browser routing.
 
 ## Standing constraints (injected into every subagent)
 
@@ -611,3 +620,6 @@ If a subagent returns `status: blocked`:
 - **Relying solely on agent notifications for completion** — notifications can be lost (context compaction, hook interference, parallel race). Always poll `.harness/agent-results/<task_id>.json` via `parallel-wait.sh`. Result files are the source of truth.
 - **Agent not writing result file** — every parallel agent MUST call `.harness-write.sh` before returning, even on FAIL or BLOCKED. Without it, `parallel-wait.sh` will timeout waiting indefinitely.
 - **Master blocking on notification with no timeout** — always use `parallel-wait.sh` with an explicit timeout. Without it, a stalled agent makes the entire group hang forever.
+- **Extracting an image inline on Opus/Fable** — image extraction is always Sonnet. On a pricey master, delegate to a Sonnet sub-agent. Never OCR/read an image on Opus.
+- **Taking a screenshot / surfing web inline on Opus/Fable** — summon a Sonnet sub-agent for the op and continue reasoning on the main model. Don't burn Opus tokens on browser I/O.
+- **Upgrading a browser/screenshot task above Sonnet without "pakai opus"** — Sonnet is the default and ceiling for browser ops unless the user explicitly overrides.

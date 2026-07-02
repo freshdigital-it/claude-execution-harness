@@ -83,6 +83,40 @@ Applies to EVERY LLM verification spawn: the adversarial security verifier (Sub-
 and the GAN evaluator for `fe-visual`. Deterministic gates (SAST/SCA, tsc, linter, qa-gate.sh
 checks) are model-independent and unaffected.
 
+## Multimodal & browser routing (vision/browser = Sonnet tier)
+
+Vision and browser I/O are cheap, accurate on Sonnet, and wasteful on Opus/Fable.
+Route them to Sonnet regardless of the main session model.
+
+**Rule 1 — Image extraction is always Sonnet (hard).**
+When the user sends an image that must be read / extracted / OCR'd / described, the
+extraction runs on Sonnet. No downgrade to Haiku (accuracy), no upgrade to Opus (waste).
+If the master is on Opus/Fable, delegate the extraction to a Sonnet sub-agent (Rule 3).
+This rule has NO override — it is fixed.
+
+**Rule 2 — Screenshot / web surfing defaults to Sonnet, overridable.**
+Any task using `preview_screenshot`, browser navigation, or MCP browser tools runs on
+Sonnet by default. Override only when the user explicitly says **"pakai opus"** (or sets
+`HARNESS_BROWSER_MODEL=opus`) — then that task uses Opus. Absent an explicit override,
+never upgrade a browser/screenshot task above Sonnet.
+
+**Rule 3 — Delegate vision/browser while implementing on a pricey model.**
+If the master is executing/implementing on **Opus or Fable** and a step needs a screenshot,
+browser action, or image extraction, do NOT perform it inline on the expensive model.
+Summon a **Sonnet sub-agent** (`model: "sonnet"`) scoped to just that op, capture its
+returned result (text/summary), and continue reasoning. The expensive model keeps the
+reasoning thread; the cheap model does the I/O. Applies even mid-task.
+
+```
+master on Opus/Fable
+  needs screenshot / image read / web surf
+  → spawn Agent(model: "sonnet", effort: "low",
+                prompt: "Capture <url> / extract <image> → return findings only")
+  → read the sub-agent's summary, continue
+```
+
+Override precedence: explicit "pakai opus" (Rule 2) > default Sonnet. Rule 1 is not overridable.
+
 ## Deferred review — adversarial verifier contract
 
 Security verifier is NOT a blessing pass. The verifier gate has two sub-steps:
