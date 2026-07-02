@@ -43,6 +43,7 @@ Ganti satu kelas `FE-ops` dengan 4 sub-class berdasarkan failure-attribution com
 - Semua sub-class lain: Sonnet karena butuh failure-attribution lintas CSS/component/state/API.
 - Screenshot **hanya** di `fe-visual`. Semua lain: DOM + CSS text assertions.
 - `fe-visual` adalah recovery path, bukan default. Hanya diaktifkan setelah `fe-component`/`fe-page` gagal conformance 1x pada pixel fidelity.
+- **Model GAN evaluator** diresolusi via `scripts/verify-model.sh <generator_model> fe-visual`, bukan hardcode. Default `one-below` + floor Sonnet: generator Sonnet → evaluator Sonnet; generator Opus → evaluator Sonnet. Lihat `reference/autonomy.md` § Verification model policy.
 
 ---
 

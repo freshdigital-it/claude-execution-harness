@@ -50,6 +50,39 @@ Opus stuck                   → BLOCKED (halt + report to human)
 ALWAYS pass both `model:` and `effort:` when spawning Agent. Omitting either lets subagent inherit
 parent session defaults — if master runs on Opus at default effort, all subagents inherit both.
 
+## Verification model policy (QA is cheaper than implementation)
+
+Verification/QA model is resolved RELATIVE to the implementation model, not hardcoded.
+Master resolves it per verifier spawn:
+
+```bash
+V=$(scripts/verify-model.sh <impl_model> <task_class>)   # -> haiku | sonnet | opus
+# then spawn verifier Agent with model: "$V"
+```
+
+Model ladder: `haiku(1) < sonnet(2) < opus(3)`.
+
+`HARNESS_VERIFY_POLICY` env var controls the rule:
+
+| Policy | Behavior | Opus impl -> verifier |
+|---|---|---|
+| `one-below` (default) | implementer - 1 tier, floored | **Sonnet** |
+| `equal` | same tier as implementer | Opus |
+| `fixed:<model>` | always this model | (whatever you set) |
+
+**Per-class floor (one-below only):** everything that spawns an LLM verifier floors at
+Sonnet — security adversarial verifier, fe-visual GAN evaluator, business/bugfix correctness.
+Only `mechanical-fan`, `refactor`, `fe-mechanical` may drop to Haiku, and those use
+deterministic gates (tsc/linter) so they rarely call the resolver at all. Net effect:
+one-below only ever bites when the implementer was Opus → verifier becomes Sonnet.
+
+This is the generator/verifier asymmetry: a strong implementer (Opus) is checked by a
+capable-but-cheaper verifier (Sonnet 5). The default gives exactly "Opus builds, Sonnet verifies."
+
+Applies to EVERY LLM verification spawn: the adversarial security verifier (Sub-step B below)
+and the GAN evaluator for `fe-visual`. Deterministic gates (SAST/SCA, tsc, linter, qa-gate.sh
+checks) are model-independent and unaffected.
+
 ## Deferred review — adversarial verifier contract
 
 Security verifier is NOT a blessing pass. The verifier gate has two sub-steps:
@@ -66,7 +99,7 @@ Run `scripts/security-scan.sh <project_root> --changed-only` before spawning the
 Only runs after Sub-step A passes. Verifier prompt MUST:
 
 1. **Adversarial framing**: *"Attempt to break this implementation. Try cross-tenant access, privilege escalation, injection, and boundary violations. Default to `REFUTED` unless you are certain the constraint holds under all inputs."*
-2. **Different model** from implementer (different instance prevents confirmation bias). Sonnet implementer → Sonnet verifier. Haiku implementer → Sonnet verifier. Opus only if implementer used Opus AND gate failed once.
+2. **Different instance, model per verification policy** (a fresh instance prevents confirmation bias). Resolve with `scripts/verify-model.sh <impl_model> security-core` — under the default `one-below` policy: Opus impl → Sonnet verifier; Sonnet/Haiku impl → Sonnet verifier (security floor). Escalate verifier to Opus only if the gate already failed once at the resolved tier.
 3. **Negative tests mandatory**: cross-tenant read, privilege escalation, invalid token/scope, injection attempt (SQL / path traversal), secrets-in-response check.
 4. **Return contract**: `{verdict: APPROVED|NEEDS_REVIEW|BLOCKED, findings: [{issue, severity, proof}], confidence: high|medium|low}`.
 

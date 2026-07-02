@@ -73,10 +73,15 @@ PHASE 3: Delivery
 
 ## Deferred review (no mid-run interruption)
 
-security-core gate = **Sub-step A** (SAST/SCA via `scripts/security-scan.sh`, zero LLM tokens) → **Sub-step B** (adversarial Sonnet verifier, negative tests) → commit → append to `review-ledger.md`.
+security-core gate = **Sub-step A** (SAST/SCA via `scripts/security-scan.sh`, zero LLM tokens) → **Sub-step B** (adversarial LLM verifier, negative tests) → commit → append to `review-ledger.md`.
 Human reads ledger **once** at end, not per-task.
 
-Verifier escalates to Opus only if implementer already used Opus AND gate failed once.
+**Verifier model is resolved relative to the implementer** — not hardcoded:
+`V=$(scripts/verify-model.sh <impl_model> <task_class>)`. Default policy `one-below` →
+Opus implementer verified by Sonnet, with a Sonnet floor for security/business.
+Configure via `HARNESS_VERIFY_POLICY` (`one-below` | `equal` | `fixed:<model>`).
+Escalate verifier to Opus only if the gate already failed once at the resolved tier.
+→ full policy + floor rules: `reference/autonomy.md` § Verification model policy.
 
 ## Phase integration gate (BLOCKING — Opus #1)
 
@@ -157,6 +162,7 @@ EOF
 | `scripts/phase-integration-gate.sh` | **Integration** Re-run all negative tests + Playwright journeys at phase boundary (Opus #1, BLOCKING) |
 | `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
+| `scripts/verify-model.sh` | **QA policy** Resolve verifier model from implementer model + `HARNESS_VERIFY_POLICY` (default: Opus→Sonnet, Sonnet floor for security/business). |
 | `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO before PR/deploy. |
 | `scripts/parallel-group-plan.py` | **Parallel** Build parallel execution groups from plan.dag.json — groups tasks with disjoint files_touched + no DAG deps. |
 | `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree + register file claims + install `.harness-write.sh` in worktree. |
