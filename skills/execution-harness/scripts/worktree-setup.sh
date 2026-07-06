@@ -64,7 +64,9 @@ PYEOF
 # ── Create detached-HEAD worktree ──────────────────────────────────────────────
 COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 log "Creating worktree at $WORKTREE_PATH (detached @ ${COMMIT:0:8})"
-git -C "$PROJECT_ROOT" worktree add --detach "$WORKTREE_PATH" "$COMMIT"
+# stdout of `git worktree add` ("HEAD is now at ...") must NOT pollute this script's
+# stdout — the only stdout line is the worktree path the master captures. Send git → stderr.
+git -C "$PROJECT_ROOT" worktree add --detach "$WORKTREE_PATH" "$COMMIT" >&2
 
 # Copy agent-result-write.sh into worktree so agent can call it without knowing harness path
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
