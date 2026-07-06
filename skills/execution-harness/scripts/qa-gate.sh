@@ -153,6 +153,50 @@ else:
     except Exception:
         chk("lighthouse", "SKIP", "could not parse lighthouse output")
 
+# ── 7. Accessibility (axe-core per approved-contract route) ──────────────────
+a11y_script = script_dir / "fe-a11y-check.sh"
+if contract_dir.exists() and a11y_script.exists():
+    approved = [f for f in contract_dir.glob("*.yaml") if contract_is_approved(f)]
+    if not approved:
+        chk("a11y_axe", "SKIP", "no approved contracts")
+    else:
+        violated, skipped = [], 0
+        for c in approved:
+            route = f"/{c.stem.replace('_', '-')}"
+            r = subprocess.run(
+                [str(a11y_script), preview_url, route, "--harness-dir", str(harness_dir)],
+                capture_output=True)
+            if r.returncode == 2:   skipped += 1
+            elif r.returncode == 1: violated.append(c.stem)
+        if skipped == len(approved):
+            chk("a11y_axe", "SKIP", "axe tooling not installed (@axe-core/playwright)")
+        else:
+            chk("a11y_axe",
+                "FAIL" if violated else "PASS",
+                (f"{len(violated)} screen(s) with serious/critical: {', '.join(violated)}"
+                 if violated else f"{len(approved)-skipped} screens clean (axe WCAG 2.1 AA)"))
+else:
+    chk("a11y_axe", "SKIP", "no contracts or fe-a11y-check.sh")
+
+# ── 8. Performance budget (bundle size + Core Web Vitals) ────────────────────
+perf_script = script_dir / "fe-perf-budget.sh"
+if (project_root / "performance-budget.json").exists() and perf_script.exists():
+    r = subprocess.run(
+        [str(perf_script), str(project_root), preview_url, "--harness-dir", str(harness_dir)],
+        capture_output=True)
+    if r.returncode == 2:
+        chk("perf_budget", "SKIP", "budget/tooling unavailable")
+    else:
+        try:
+            pb = json.loads((harness_dir / "perf-budget.json").read_text())
+            chk("perf_budget",
+                "PASS" if pb["verdict"] == "PASS" else "FAIL",
+                "within budget" if pb["verdict"] == "PASS" else "; ".join(pb["failures"]))
+        except Exception:
+            chk("perf_budget", "SKIP", "could not read perf-budget.json")
+else:
+    chk("perf_budget", "SKIP", "no performance-budget.json")
+
 # ── Final verdict ─────────────────────────────────────────────────────────────
 verdict = "NO-GO" if no_go else "GO"
 report  = {

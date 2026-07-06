@@ -12,7 +12,7 @@ TDD klasik (unit-test-first) tidak cocok untuk FE. Model yang dipakai:
 
 | Layer | Pendekatan | Tool (per stack) | Kapan |
 |---|---|---|---|
-| Static | TypeScript strict + ESLint | tsc, eslint | Setiap commit |
+| Static | TS strict + ESLint + **a11y lint** | tsc, eslint (+ `jsx-a11y` / `vuejs-accessibility`) | Setiap commit |
 | Unit/Logic | Hook/composable + util sebagai logika murni, tanpa render | Vitest/Jest | logika diekstrak dari komponen (§ Logic/Presentation) |
 | Integration/Behavior | Testing Trophy — find by role | Vue Test Utils / RTL | `fe-component` gate |
 | Acceptance | ATDD — test ditulis DULU (failing) | Playwright | `fe-page`, `fe-api-wiring` |
@@ -84,6 +84,41 @@ Prinsip: komponen = **presentasi tipis**. Logic (derivasi data, side-effect, ork
 
 ---
 
+## Accessibility (a11y) — framework-agnostic
+
+A11y bukan skor Lighthouse sekali di release. Tiga lapis, termurah dulu:
+
+1. **Lint (per-commit)** — `eslint-plugin-jsx-a11y` (React) / `eslint-plugin-vuejs-accessibility` (Vue) di static layer. Tangkap: missing alt, label tanpa control, role invalid, positive tabindex. Zero-cost.
+2. **axe-core (conformance gate)** — `scripts/fe-a11y-check.sh <url> <route>` per screen. WCAG 2.1 AA per-node. Gate FAIL pada impact serious/critical. Jauh lebih dalam dari skor Lighthouse (~35% coverage) → axe ~57% + spesifik per elemen.
+3. **Lighthouse a11y (release)** — skor agregat di `qa-gate.sh` tetap jalan sebagai coarse net.
+
+**Yang wajib di setiap interactive component (masuk rubric + behavior test):**
+- Semua control punya accessible name (label/aria-label). Behavior test find-by-role sudah menegakkan ini sebagian.
+- Focus visible + focus trap benar di modal/dialog. Focus kembali ke trigger saat close.
+- Error pakai `role="alert"` / `aria-live`. State (loading/disabled) diekspos via `aria-*`, bukan cuma visual.
+- Kontras warna dari design tokens memenuhi 4.5:1 (teks) — cek di axe.
+
+---
+
+## Forms & Mutations — framework-agnostic
+
+### Validation (gate: form journeys, `fe-page`/`fe-api-wiring`)
+- **Schema-driven**, bukan if-else manual: zod/yup/valibot + adapter (vee-validate / react-hook-form). Satu sumber kebenaran validasi.
+- Field-level error muncul **on blur / on submit**, bukan on every keystroke (kecuali async uniqueness check dengan debounce).
+- Submit **disabled sampai valid**, atau enabled + tampilkan error saat submit. Konsisten per app, catat di contract.
+- Error message spesifik & actionable ("Email harus mengandung @"), bukan "Invalid".
+- Server-side validation error (422) dipetakan kembali ke field yang tepat, bukan toast generik.
+
+### Mutations (gate: `fe-api-wiring`)
+- Mutation lewat server-state library (`useMutation`), bukan fetch manual + refetch manual.
+- **Optimistic update + rollback**: update UI segera, snapshot state lama, rollback on error, invalidate query on settle. Untuk operasi yang sering & low-risk (toggle, reorder, quick edit).
+- **Double-submit dilarang**: tombol disabled selama pending (`isPending`).
+- Setiap mutation punya 3 UI-state: pending (feedback), success (invalidate + toast/inline), error (rollback + pesan + retentif input user).
+
+**Anti-pattern:** optimistic update tanpa rollback (UI bohong saat server tolak), atau mutation yang menyalin response ke store manual alih-alih invalidate query (§ State Architecture).
+
+---
+
 ## UX Contract
 
 Machine-readable spec per screen yang menjadi SSOT untuk implementasi dan verifikasi.
@@ -103,6 +138,10 @@ Script parse `design/*.html` → extract struktur per screen → generate YAML d
 screen: invoice-list
 prototype_source: design/Reksa ERP.html
 prototype_section: "#invoice-list"   # section id atau line range
+
+breakpoints:                          # multi-viewport verification (min mobile + desktop)
+  mobile:  375                        # table → cards/stacked, no horizontal scroll
+  desktop: 1280                       # full table layout
 
 states:
   loading:
@@ -219,8 +258,10 @@ Gate khusus FE yang test terhadap UX contract, bukan hanya build green.
 1. **tsc + linter + build** — `fe-mechanical` oracle. Text, deterministic, no browser.
 2. **CSS token checklist** — `toHaveCSS` untuk properties dari design tokens (bg, color, padding, gap, font-size, radius). Cheapest browser check. Pakai untuk bottleneck A (visual).
 3. **DOM structure diff** — normalize outerHTML skeleton → compare ke prototype section skeleton. Catches missing component, wrong nesting, missing empty-state.
-4. **Playwright journey** — drive interaction → assert DOM state transitions. Untuk bottleneck B dan C. No screenshot.
-5. **Screenshot diff** — image tokens, paling mahal. **Hanya di `fe-visual`/GAN.** Never first.
+4. **axe-core a11y** — `fe-a11y-check.sh <url> <route>` → WCAG 2.1 AA per-node violations. Gate FAIL pada serious/critical. Lebih dalam dari skor Lighthouse. Zero image tokens.
+5. **Multi-viewport** — jalankan tier 2-4 minimal di 2 viewport: mobile (375px) + desktop (1280px). Breakpoint dari `breakpoints` di UX contract. Layout tidak boleh overflow/overlap di salah satu.
+6. **Playwright journey** — drive interaction → assert DOM state transitions. Untuk bottleneck B dan C. No screenshot.
+7. **Screenshot diff** — image tokens, paling mahal. **Hanya di `fe-visual`/GAN.** Never first.
 
 ### Localized delta format (mandatory evaluator return)
 
@@ -400,7 +441,12 @@ Diinjeksikan ke setiap FE subagent saat spawn. Hard budget: ≤1,500 tokens.
 > ARSITEKTUR (gate criteria, lihat § State Architecture + § Logic/Presentation):
 > - Server data lewat server-state library, JANGAN di useState/ref manual atau store global.
 > - Komponen tetap tipis: ekstrak business logic/API call ke hook/composable + unit-test terpisah.
-> - Loading/error/empty diturunkan dari status server-state library, bukan boolean manual."
+> - Loading/error/empty diturunkan dari status server-state library, bukan boolean manual.
+>
+> KUALITAS (gate criteria, lihat § Accessibility + § Forms & Mutations):
+> - a11y: control punya accessible name, focus visible, error role=alert. Lolos axe serious/critical.
+> - Layout benar di mobile (375) + desktop (1280) — no horizontal scroll.
+> - Form: validasi schema-driven, submit anti double-click. Mutation optimistic wajib rollback."
 
 ### Optional (pull on demand, jangan push)
 

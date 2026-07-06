@@ -172,7 +172,9 @@ EOF
 | `scripts/delivery-metrics.sh` | **Metrics** DORA-aligned metrics from trajectory.jsonl — CFR, gate pass rate, tokens by class |
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
 | `scripts/verify-model.sh` | **QA policy** Resolve verifier model from implementer model + `HARNESS_VERIFY_POLICY` (default: Opus→Sonnet, Sonnet floor for security/business). |
-| `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks → GO/NO-GO before PR/deploy. |
+| `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks (incl. axe a11y + perf budget) → GO/NO-GO before PR/deploy. |
+| `scripts/fe-a11y-check.sh` | **FE/a11y** axe-core WCAG 2.1 AA per route — deeper than Lighthouse score. FAIL on serious/critical. |
+| `scripts/fe-perf-budget.sh` | **FE/perf** Bundle-size (gzip) + Core Web Vitals (LCP/CLS/TBT) vs `performance-budget.json`. |
 | `scripts/parallel-group-plan.py` | **Parallel** Build parallel execution groups from plan.dag.json — groups tasks with disjoint files_touched + no DAG deps. |
 | `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree + register file claims + install `.harness-write.sh` in worktree. |
 | `scripts/worktree-teardown.sh` | **Parallel** Copy agent output to main project + commit (serialized) + remove worktree + release claims. |
@@ -597,6 +599,11 @@ If a subagent returns `status: blocked`:
 - **Server data di state manual (Gap A)** — response API disimpan di `useState`/`ref`/store global sebagai sumber kebenaran → gate FAIL. Server state WAJIB lewat server-state library (TanStack/Vue Query). Store global hanya untuk UI state asli. Lihat `reference/fe-execution.md` § State Architecture.
 - **Komponen tebal berisi business logic (Gap B)** — API call / logic non-trivial / transformasi kompleks di dalam komponen. Ekstrak ke hook/composable + unit-test terpisah. Komponen = presentasi tipis. Lihat § Logic/Presentation Separation.
 - **Introduksi server-state library diam-diam** — kalau codebase belum punya, jangan asumsikan; itu keputusan lintas-cutting → `status: blocked` + surface ke user, jangan taruh server data di store manual sebagai jalan pintas.
+- **a11y hanya mengandalkan skor Lighthouse** — Lighthouse a11y ~35% coverage, sekali di release. Best-practice: a11y lint per-commit + axe-core (`fe-a11y-check.sh`) per komponen di conformance gate. Lihat `reference/fe-execution.md` § Accessibility.
+- **Perf hanya skor Lighthouse localhost** — skor agregat di localhost sembunyikan biaya network + regresi bundle. Wajib `performance-budget.json` + `fe-perf-budget.sh` (bundle-size gzip + CWV per-metrik).
+- **Verifikasi FE cuma satu viewport** — layout wajib dicek min mobile (375) + desktop (1280) dari `breakpoints` di UX contract. Table→cards di mobile, no horizontal scroll.
+- **Optimistic update tanpa rollback** — UI berbohong saat server tolak. Setiap mutation optimistic wajib snapshot + rollback on error + invalidate on settle. Lihat § Forms & Mutations.
+- **Validasi form if-else manual** — pakai schema (zod/yup) + adapter, satu sumber kebenaran. Server 422 dipetakan ke field, bukan toast generik.
 - **Memberikan instruksi setup manual ke user** — semua file (deploy-config.sh, harness-ci.yml) di-generate dan di-commit oleh master. Satu-satunya yang user lakukan manual adalah menambah GitHub secrets, karena itu menyentuh credentials.
 - **Skip Project Setup Detection** — wajib cek di setiap invocation. Kalau CI belum ada, setup dulu sebelum Phase 0.
 - **Skip Phase 0 karena "plan sudah ada di kepala"** — tanpa PRD/Spec/Plan yang di-approve, tidak ada SSOT. Subagent akan buat asumsi berbeda-beda.

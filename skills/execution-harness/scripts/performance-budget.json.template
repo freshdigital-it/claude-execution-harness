@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to <project_root>/performance-budget.json and tune per app. Read by fe-perf-budget.sh.",
+  "bundle": {
+    "total_kb_gzip": 250,
+    "js_kb_gzip": 180
+  },
+  "cwv": {
+    "lcp_ms": 2500,
+    "cls": 0.1,
+    "tbt_ms": 300
+  }
+}
