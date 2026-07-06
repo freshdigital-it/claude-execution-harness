@@ -594,6 +594,9 @@ If a subagent returns `status: blocked`:
 - **Skipping fe-server-check.sh** — FE verification without health check is unreliable (Vite may serve stale build, producing false positives that cost iteration cycles).
 - **Running `ux-contract-generate.py` but skipping human approval** — only `status: approved` contracts enter the loop. Draft contracts are skipped silently.
 - **Screenshotting in fe-component/fe-page** — image tokens only in `fe-visual`. Text-based conformance gate first.
+- **Server data di state manual (Gap A)** — response API disimpan di `useState`/`ref`/store global sebagai sumber kebenaran → gate FAIL. Server state WAJIB lewat server-state library (TanStack/Vue Query). Store global hanya untuk UI state asli. Lihat `reference/fe-execution.md` § State Architecture.
+- **Komponen tebal berisi business logic (Gap B)** — API call / logic non-trivial / transformasi kompleks di dalam komponen. Ekstrak ke hook/composable + unit-test terpisah. Komponen = presentasi tipis. Lihat § Logic/Presentation Separation.
+- **Introduksi server-state library diam-diam** — kalau codebase belum punya, jangan asumsikan; itu keputusan lintas-cutting → `status: blocked` + surface ke user, jangan taruh server data di store manual sebagai jalan pintas.
 - **Memberikan instruksi setup manual ke user** — semua file (deploy-config.sh, harness-ci.yml) di-generate dan di-commit oleh master. Satu-satunya yang user lakukan manual adalah menambah GitHub secrets, karena itu menyentuh credentials.
 - **Skip Project Setup Detection** — wajib cek di setiap invocation. Kalau CI belum ada, setup dulu sebelum Phase 0.
 - **Skip Phase 0 karena "plan sudah ada di kepala"** — tanpa PRD/Spec/Plan yang di-approve, tidak ada SSOT. Subagent akan buat asumsi berbeda-beda.

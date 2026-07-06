@@ -6,10 +6,15 @@ Panduan eksekusi task Frontend di harness. Dibaca oleh master dan diinjeksikan k
 
 TDD klasik (unit-test-first) tidak cocok untuk FE. Model yang dipakai:
 
-| Layer | Pendekatan | Tool | Kapan |
+> **Framework-neutral.** Prinsip di bawah berlaku lintas framework. Tool di kolom "Tool"
+> adalah default (Vue) — padanannya 1:1: composable↔hook, Vue Test Utils↔React Testing Library,
+> Pinia↔Zustand/Redux, Vue Query↔TanStack Query. Pilih tool mengikuti codebase, jangan lock.
+
+| Layer | Pendekatan | Tool (per stack) | Kapan |
 |---|---|---|---|
 | Static | TypeScript strict + ESLint | tsc, eslint | Setiap commit |
-| Integration/Behavior | Testing Trophy — find by role | Vue Test Utils | `fe-component` gate |
+| Unit/Logic | Hook/composable + util sebagai logika murni, tanpa render | Vitest/Jest | logika diekstrak dari komponen (§ Logic/Presentation) |
+| Integration/Behavior | Testing Trophy — find by role | Vue Test Utils / RTL | `fe-component` gate |
 | Acceptance | ATDD — test ditulis DULU (failing) | Playwright | `fe-page`, `fe-api-wiring` |
 | Visual Regression | VRT baseline + diff | Playwright screenshot | `fe-visual` (escalation only) |
 | Component spec | CDD — states per screen = contract | UX contract YAML | Plan-time |
@@ -44,6 +49,38 @@ Ganti satu kelas `FE-ops` dengan 4 sub-class berdasarkan failure-attribution com
 - Screenshot **hanya** di `fe-visual`. Semua lain: DOM + CSS text assertions.
 - `fe-visual` adalah recovery path, bukan default. Hanya diaktifkan setelah `fe-component`/`fe-page` gagal conformance 1x pada pixel fidelity.
 - **Model GAN evaluator** diresolusi via `scripts/verify-model.sh <generator_model> fe-visual`, bukan hardcode. Default `one-below` + floor Sonnet: generator Sonnet → evaluator Sonnet; generator Opus → evaluator Sonnet. Lihat `reference/autonomy.md` § Verification model policy.
+
+---
+
+## State Architecture (server-state vs UI-state) — framework-agnostic
+
+Bug arsitektur FE terbesar: mencampur **server state** dan **UI state**. Harness memisahkan tegas.
+
+| Jenis | Definisi | Mekanisme | Contoh |
+|---|---|---|---|
+| **Server state** | Data yang dimiliki backend, cuma di-cache di client | Server-state library (TanStack/Vue Query, RTK Query) | daftar invoice, profil user, hasil search |
+| **UI state** | State asli client, tidak ada di server | `useState`/`ref`/signal, atau store ringan (Zustand/Pinia/Context) | modal open, tab aktif, filter draft, wizard step |
+
+**Gate criterion (`fe-api-wiring`, dan `fe-page` yang fetch data):**
+- Server data WAJIB lewat server-state library (fetch + cache + invalidation). **DILARANG** disimpan di `useState`/`ref` manual atau disalin ke store global sebagai sumber kebenaran.
+- Store global (Pinia/Zustand/Redux) hanya untuk UI state asli. Response API yang disalin ke store manual → gate FAIL.
+- Loading/error/empty diturunkan dari status server-state library (`isLoading`/`isError`), bukan boolean manual yang gampang de-sync.
+- **Jika codebase belum punya server-state library:** jangan diam-diam menaruh server data di Pinia manual. Surface sebagai design decision (`status: blocked` + `assumption_if_unblocked`) — introduksi library adalah keputusan lintas-cutting, bukan asumsi subagent.
+
+**Kenapa:** server data di state manual → stale cache, de-sync antar komponen, refetch manual, race condition. Kelas bug "halu arsitektur" yang paling sering.
+
+---
+
+## Logic/Presentation Separation — framework-agnostic
+
+Prinsip: komponen = **presentasi tipis**. Logic (derivasi data, side-effect, orkestrasi) ditarik ke **hook (React) / composable (Vue)** yang bisa dites tanpa render. Ini melengkapi global clean-architecture rule ("No business logic in components") dengan verifikasi di gate — bukan cuma aturan tertulis.
+
+**Gate criterion (`fe-component`, `fe-api-wiring`):**
+- Komponen tidak boleh berisi: API call langsung, business logic non-trivial, transformasi data kompleks → ekstrak ke hook/composable.
+- Logic yang diekstrak WAJIB punya **unit test terpisah** (deterministik, tanpa render UI) — inilah layer "Unit/Logic" di Testing Model. Ini juga titik di mana TDD selektif masuk akal.
+- Pembagian test: behavior test (VTU/RTL) menguji komponen dari sudut user; unit test menguji hook/composable sebagai logika murni. Jangan tumpang tindih.
+
+**Heuristik "komponen terlalu tebal":** kalau sebuah komponen butuh >1 `useEffect`/watcher untuk data, atau punya fungsi transformasi >10 baris di dalam body-nya → ekstrak.
 
 ---
 
@@ -358,7 +395,12 @@ Diinjeksikan ke setiap FE subagent saat spawn. Hard budget: ≤1,500 tokens.
 **Instruksi ke subagent yang wajib disertakan:**
 > "Tests di `tests/e2e/ux-contracts/<screen>.spec.ts` dan `tests/unit/ux-contracts/<screen>.test.ts`
 > saat ini FAILING. Tugasmu: implementasi komponen sehingga semua test PASS.
-> Jangan modifikasi test files — modifikasi source code saja."
+> Jangan modifikasi test files — modifikasi source code saja.
+>
+> ARSITEKTUR (gate criteria, lihat § State Architecture + § Logic/Presentation):
+> - Server data lewat server-state library, JANGAN di useState/ref manual atau store global.
+> - Komponen tetap tipis: ekstrak business logic/API call ke hook/composable + unit-test terpisah.
+> - Loading/error/empty diturunkan dari status server-state library, bukan boolean manual."
 
 ### Optional (pull on demand, jangan push)
 
