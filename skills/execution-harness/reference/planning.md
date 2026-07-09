@@ -34,7 +34,36 @@ Pilihan Anda?
 - B → skip Phase 0, reset all task status → pending, go to Phase 1
 - C → proceed to PRD generation
 
-### If no artifacts — proceed to PRD generation immediately.
+### If no artifacts — proceed to idea-refine check, then PRD generation.
+
+---
+
+## Idea-Refine (P0-pre) — only when the idea is still vague
+
+The PRD questions *clarify* a known feature. They do NOT help when you don't yet know
+*what* to build. Detect that first.
+
+**Trigger (idea is vague/exploratory) if the request is:**
+- a one-liner with no clear direction ("bikin fitur loyalty", "improve onboarding"),
+- an outcome without a mechanism ("kurangi churn"), or
+- explicitly asking to explore ("gimana sebaiknya…", "opsi apa saja…").
+
+**If NOT vague** (feature is concrete, e.g. "add subtract() to math.js") → skip this,
+go straight to PRD.
+
+**If vague → run one divergent→convergent round BEFORE the PRD:**
+```
+1. DIVERGE: propose 2-3 distinct directions, each with a one-line mechanism +
+   its main trade-off. Not variations of one idea — genuinely different approaches.
+2. CONVERGE: ask the user to pick a direction (or combine), or offer /decide
+   for a weighted comparison if they're torn.
+3. Only after a direction is chosen → proceed to PRD questions for THAT direction.
+```
+This is the `idea-refine` step (borrowed from agent-skills). It is the ONE place the
+harness does divergent ideation; everything after assumes the *what* is settled.
+
+Do NOT invent the direction yourself and proceed — offer options, let the user choose.
+If the user's one-liner is already concrete, do not manufacture ambiguity.
 
 ---
 

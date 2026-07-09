@@ -42,6 +42,7 @@ From idea to GitHub PR. One command. No assumptions. No bolak-balik.
 Opus is reserved as difficulty escalation only — never as a class default.
 
 → `reference/fe-execution.md` for FE sub-class playbook, UX contract schema, GAN prompts, rubric.
+→ `reference/backend-execution.md` for API contract discipline, error semantics, idempotency, tenancy, backend testing layers (business / security-core / bugfix tasks touching endpoints or data).
 
 ## Lifecycle
 
@@ -66,7 +67,8 @@ PHASE 3: Delivery
   → Production: ALWAYS explicit — gh workflow run deploy-production (never in loop)
 ```
 
-→ `reference/planning.md` for Phase 0 question protocol, PRD/Spec/Plan schemas, approval gates.
+→ `reference/planning.md` for Phase 0 question protocol (incl. idea-refine P0-pre for vague ideas), PRD/Spec/Plan schemas, approval gates.
+→ `reference/adr-migration.md` for ADR format + migration-safety (expand-contract, rollback-required) — used at Spec Data-Model + decision-ledger reconciliation.
 ```
 
 → `reference/lifecycle.md` for isolation details, migration workaround, deploy gate.
@@ -288,6 +290,11 @@ P0b. If found → surface to user + ask: A (resume) / B (restart) / C (buat baru
      A → skip to Step-0 with existing plan
      B → skip to Step-0, reset all task status → pending
      C → proceed to P0c
+
+P0c0. Idea-refine check (only if idea is vague/exploratory — see reference/planning.md):
+      Concrete feature → skip. Vague ("bikin fitur loyalty", "kurangi churn") →
+      run ONE divergent→convergent round (offer 2-3 directions + trade-offs, user picks)
+      BEFORE the PRD. Do not invent the direction; offer options.
 
 P0c. PRD generation (no plan at all, OR user chose C):
      Ask BATCH 1 + BATCH 2 in ONE message (see reference/planning.md for exact questions).
