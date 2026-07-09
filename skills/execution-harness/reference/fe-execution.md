@@ -418,6 +418,46 @@ K=3 GAN failure hampir selalu berarti ada design decision yang belum ada di cont
 
 ---
 
+## Independent Conformance Verifier (dual-diff)
+
+Untuk `fe-page`/`fe-visual` yang shipping UI: setelah gate build/test lolos, spawn
+verifier **terpisah dari implementer** (mencegah bias "kelihatan selesai"). Prompt
+adversarial: "cari mismatch; anggap NOT-conformant sampai terbukti." Ia menjalankan app
+live dan menghasilkan dua diff:
+
+1. **UI ↔ prototype** — screenshot layar yang dibangun di viewport sama dengan baseline,
+   diff vs baseline PNG. Delta konkret: spacing, warna, komponen hilang/lebih, copy salah.
+2. **UX journey** — jalankan click-path contract; assert tiap checkpoint, **0 console error**,
+   **0 network 4xx/5xx**, + persistence (reload → data tetap benar).
+
+Output ACI (bounded, bukan raw) → `review-ledger.md` sebagai `CONFORMANT`/`DELTAS`/`BLOCKED`:
+```json
+{ "screen": "invoices-list", "conformant": false,
+  "ui_deltas": [{"area":"header CTA","expected":"primary blue","actual":"gray ghost"}],
+  "journey": [{"step":3,"expected":"tax 110000","actual":"tax 0","pass":false}],
+  "console_errors": 0, "network_failures": 1 }
+```
+Prinsip anti-rework: gate di batas TASK (bukan akhir sprint) → miss muncul saat konteks
+masih panas; referensi frozen & shared → redo menyasar delta spesifik, bukan seluruh layar.
+
+## reksa-erp actualization
+
+Operasional spesifik proyek reksa-erp (jangan reinvent):
+- **Prototype binding:** `design/*.html` di worktree reksa-erp adalah kebenaran — match
+  visual DAN behavioral ("cara kerja").
+- **Port pinned per vertical (`scripts/dev-up.sh <vertical>`):** clinic 5173/:8080,
+  b2b 5273/:8180, superadmin 5373/:8280. Verifikasi selalu di port vertical sendiri
+  (separuh "tidak match" = salah server). Lihat user-memory `reksa-erp-dev-port-convention`.
+- **Pakai Playwright infra EXISTING** — jangan bikin baru: `frontend/apps/web/e2e/`
+  sudah punya `clinic-booking.spec.ts`, `console-provision.spec.ts`, `axe-smoke.spec.ts`
+  + config. Tulis journey spec di situ; GAN evaluator pakai runner yang sama.
+- **DB caveat:** fresh-DB migrate diblokir di reksa-erp (lihat `lifecycle.md`). Preview
+  isolated pakai seed snapshot, bukan fresh migrate.
+- **Critical journeys (tier fe-visual/GAN, K=3):** Clinic booking + receipt-first POS;
+  B2B lead→quotation→invoice (Q2C) + portal link; Superadmin tenant onboarding + role gate.
+
+---
+
 ## FE Context Bundle
 
 Diinjeksikan ke setiap FE subagent saat spawn. Hard budget: ≤1,500 tokens.
