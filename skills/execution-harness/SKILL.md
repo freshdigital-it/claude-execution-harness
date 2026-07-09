@@ -112,6 +112,8 @@ Vision/browser I/O = Sonnet tier, never burn Opus/Fable on it:
 300-LOC [HARD], 30-line methods [HARD], type safety [HARD], TDD-by-class, never-assume [HARD], clean-arch soft rules.
 
 → `reference/standing-constraints.md` for full constraint list + memory plan-time/run-end.
+→ `reference/rationalizations.md` — anti-rationalization tables (excuse → rebuttal); injected alongside constraints so subagents don't talk themselves into corner-cutting.
+→ `reference/observability.md` — structured logging + RED metrics + tracing as build-time gate criteria (business / fe-api-wiring / backend tasks).
 
 ## Commit Convention
 
@@ -566,6 +568,9 @@ Post-loop — Phase 2 + Phase 3 (master runs in sequence):
   - Runs qa-gate.sh --fast on PR
   - Posts qa-gate results as PR comment
   - Deploys to staging on PR open
+  - Post-deploy: verify GOLDEN SIGNALS, not just HTTP 200 (reference/observability.md §4):
+    readiness (deps reachable) + critical-journey smoke + error-rate + p95 latency.
+    Any signal red → failed deploy → rollback. Green build ≠ green prod.
   - Posts staging URL as PR comment
 
   Production: NEVER automatic.
