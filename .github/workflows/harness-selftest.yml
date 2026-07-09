@@ -1,0 +1,34 @@
+# Self-test the harness itself. The harness enforces verification on other code —
+# it must be verified too. Runs the unit + integration suite on every change.
+name: Harness Self-Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    name: unit + integration suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure python3 available
+        run: python3 --version
+
+      - name: Make scripts executable
+        run: chmod -R +x skills/execution-harness/scripts
+
+      - name: Run harness test suite (unit + e2e-parallel)
+        run: bash skills/execution-harness/scripts/tests/run-all.sh
+
+      - name: Shellcheck (advisory)
+        run: |
+          if command -v shellcheck >/dev/null; then
+            find skills/execution-harness/scripts -name '*.sh' -print0 \
+              | xargs -0 shellcheck -S error || true
+          else
+            echo "shellcheck not installed — skipping advisory lint"
+          fi

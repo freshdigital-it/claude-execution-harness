@@ -173,6 +173,8 @@ EOF
 | `scripts/hooks/posttooluse-token-ceiling.sh` | **Safety** PostToolUse hook: hard token ceiling (Opus #3, replaces soft self-monitoring) |
 | `scripts/verify-model.sh` | **QA policy** Resolve verifier model from implementer model + `HARNESS_VERIFY_POLICY` (default: Opus→Sonnet, Sonnet floor for security/business). |
 | `scripts/qa-gate.sh` | **Release gate** Aggregate evidence + system checks (incl. axe a11y + perf budget) → GO/NO-GO before PR/deploy. |
+| `scripts/trajectory-recall.sh` | **Learning** Ranked keyword-overlap recall over past trajectories — deterministic fallback when agentdb (semantic) unavailable. |
+| `scripts/tests/run-all.sh` | **Self-test** Unit + integration suite for the harness itself (run in CI via `.github/workflows/harness-selftest.yml`). |
 | `scripts/fe-a11y-check.sh` | **FE/a11y** axe-core WCAG 2.1 AA per route — deeper than Lighthouse score. FAIL on serious/critical. |
 | `scripts/fe-perf-budget.sh` | **FE/perf** Bundle-size (gzip) + Core Web Vitals (LCP/CLS/TBT) vs `performance-budget.json`. |
 | `scripts/parallel-group-plan.py` | **Parallel** Build parallel execution groups from plan.dag.json — groups tasks with disjoint files_touched + no DAG deps. |
@@ -402,7 +404,12 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
    If `safe_to_downgrade: true`, you MAY pick the cheaper tier — record the reason in DAG `note` field.
    If frontier reports `downgrade_note` (Haiku cold-start warning), record it explicitly in DAG `note`.
    The static task-class table remains the default; frontier is advisory only.
-4. agentdb_pattern_search for known gotchas in plan's modules
+4. Learning recall (semantic-first, deterministic fallback):
+   a. Try `agentdb_pattern_search` for known gotchas in plan's modules (semantic).
+   b. If agentdb unavailable → `scripts/trajectory-recall.sh "$PROJECT_ROOT/.harness" "<task title + key terms>" 3`
+      → ranked keyword-overlap over past trajectories (failures weighted higher).
+   Fold the top hits' reflections into the relevant task's DAG `note` as priors
+   ("similar task last failed on X"). Budget: top-3, summaries only.
 5. Read user-memory for relevant project decisions
 6. Query decision-ledger.md overlapping plan scope (code-review-graph get_impact_radius)
 7. Fold blockers + DECISION-CONFLICTs into DAG standing-constraints
