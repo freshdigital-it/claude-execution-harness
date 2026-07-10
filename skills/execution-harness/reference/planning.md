@@ -51,19 +51,29 @@ The PRD questions *clarify* a known feature. They do NOT help when you don't yet
 **If NOT vague** (feature is concrete, e.g. "add subtract() to math.js") → skip this,
 go straight to PRD.
 
-**If vague → run one divergent→convergent round BEFORE the PRD:**
-```
-1. DIVERGE: propose 2-3 distinct directions, each with a one-line mechanism +
-   its main trade-off. Not variations of one idea — genuinely different approaches.
-2. CONVERGE: ask the user to pick a direction (or combine), or offer /decide
-   for a weighted comparison if they're torn.
-3. Only after a direction is chosen → proceed to PRD questions for THAT direction.
-```
-This is the `idea-refine` step (borrowed from agent-skills). It is the ONE place the
-harness does divergent ideation; everything after assumes the *what* is settled.
+**If vague → DELEGATE, do not run ideation inline.** Master invokes the standalone
+`idea-refine` skill (`Skill(skill: "idea-refine")`) rather than duplicating its
+diverge→converge→interview logic here. That skill is the single source of truth for
+this technique — it's also directly user-invocable (`/idea-refine`) for pure
+brainstorming outside the harness entirely.
 
-Do NOT invent the direction yourself and proceed — offer options, let the user choose.
-If the user's one-liner is already concrete, do not manufacture ambiguity.
+```
+1. Invoke idea-refine skill with the user's original request as context.
+2. idea-refine runs its own DIVERGE → CONVERGE → structured-interview loop and
+   writes docs/ideas/YYYY-MM-DD-<slug>.md.
+3. On return:
+   - Direction chosen + idea note produced → seed PRD generation with it. Do NOT
+     re-ask what idea-refine's Phase 3 interview already answered — read the note,
+     fold its "Interview findings" into the PRD batch answers you already have,
+     and only ask what's still missing.
+   - User stopped mid-flow (no direction committed, pure exploration) → HALT Phase 0
+     here. Do not force a PRD. Tell the user: "Idea belum di-commit. Jalankan
+     /execution-harness lagi kapan siap lanjut."
+```
+
+This is the ONE place the harness touches divergent ideation, and it does so by
+delegating — never by re-implementing the technique inline. If `idea-refine`'s logic
+ever changes, there is exactly one file to update.
 
 ---
 

@@ -293,8 +293,9 @@ P0b. If found → surface to user + ask: A (resume) / B (restart) / C (buat baru
 
 P0c0. Idea-refine check (only if idea is vague/exploratory — see reference/planning.md):
       Concrete feature → skip. Vague ("bikin fitur loyalty", "kurangi churn") →
-      run ONE divergent→convergent round (offer 2-3 directions + trade-offs, user picks)
-      BEFORE the PRD. Do not invent the direction; offer options.
+      DELEGATE: Skill(skill: "idea-refine") — do NOT run diverge/converge inline here.
+      It writes docs/ideas/<slug>.md and returns a chosen direction, or halts if the
+      user stops mid-exploration (no forced PRD). Seed PRD from its output.
 
 P0c. PRD generation (no plan at all, OR user chose C):
      Ask BATCH 1 + BATCH 2 in ONE message (see reference/planning.md for exact questions).
