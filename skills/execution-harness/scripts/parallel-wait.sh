@@ -52,15 +52,47 @@ open(tmp,'w').write(json.dumps(data,indent=2)); os.replace(tmp,'$WAIT_OUT')
     fi
 
     if [[ $ELAPSED -ge $TIMEOUT ]]; then
-        log "TIMEOUT ${ELAPSED}s. done=${COMPLETED[*]:-none}  stuck=${PENDING[*]}"
+        log "TIMEOUT ${ELAPSED}s. done=${COMPLETED[*]:-none}  checking git evidence for: ${PENDING[*]}"
+
+        # Before declaring these stuck, reconcile against git — a task whose
+        # agent committed (Task: <id> trailer) but never wrote a result file
+        # or whose notification was lost is NOT stuck, it's DONE_UNREPORTED.
+        RECONCILED=(); STILL_STUCK=()
+        for tid in "${PENDING[@]}"; do
+            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            if bash "$SCRIPT_DIR/task-reconcile.sh" "$PROJECT_ROOT" "$tid" >/dev/null 2>&1; then
+                log "  $tid: RECONCILED via git evidence (commit found) — treating as completed"
+                RECONCILED+=("$tid")
+            else
+                STILL_STUCK+=("$tid")
+            fi
+        done
+
+        log "Final: completed=${#COMPLETED[@]}  reconciled=${#RECONCILED[@]}  still_stuck=${#STILL_STUCK[@]}"
+
+        # bash 3.2 (macOS default) note: "${arr[@]:-}" on an EMPTY array injects
+        # one phantom empty-string argument (not zero args) — it shifts every
+        # subsequent positional argv and silently corrupts the categorization.
+        # "${arr[@]}" on an empty array instead throws "unbound variable" under
+        # set -u. The only form that is correct in BOTH cases (0 args for empty,
+        # N args for non-empty, no error) is `${arr[@]+"${arr[@]}"}`.
+        # Each category is JSON-encoded to exactly ONE argv string, so there is
+        # no positional splicing to get wrong regardless of how many are empty.
+        COMPLETED_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${COMPLETED[@]+"${COMPLETED[@]}"})
+        RECONCILED_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${RECONCILED[@]+"${RECONCILED[@]}"})
+        STUCK_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${STILL_STUCK[@]+"${STILL_STUCK[@]}"})
+
         python3 -c "
 import json,os,sys
-completed=list(sys.argv[1:1+${#COMPLETED[@]}]) if ${#COMPLETED[@]} else []
-timed_out=list(sys.argv[1+${#COMPLETED[@]}:]) if ${#PENDING[@]} else []
-data={'completed':completed,'timed_out':timed_out,'elapsed_seconds':$ELAPSED}
+completed=json.loads(sys.argv[1])
+reconciled=json.loads(sys.argv[2])
+timed_out=json.loads(sys.argv[3])
+data={'completed':completed,'reconciled':reconciled,'timed_out':timed_out,'elapsed_seconds':$ELAPSED}
 tmp='$WAIT_OUT.tmp'
 open(tmp,'w').write(json.dumps(data,indent=2)); os.replace(tmp,'$WAIT_OUT')
-" "${COMPLETED[@]:-__none__}" "${PENDING[@]}"
+" "$COMPLETED_JSON" "$RECONCILED_JSON" "$STUCK_JSON"
+
+        [[ ${#STILL_STUCK[@]} -eq 0 ]] && exit 0
         exit 1
     fi
 

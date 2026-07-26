@@ -185,7 +185,11 @@ EOF
 | `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree + register file claims + install `.harness-write.sh` in worktree. |
 | `scripts/worktree-teardown.sh` | **Parallel** Copy agent output to main project + commit (serialized) + remove worktree + release claims. |
 | `scripts/agent-result-write.sh` | **Parallel** Agent calls this when done — writes durable result file master polls for completion. |
-| `scripts/parallel-wait.sh` | **Parallel** Poll `.harness/agent-results/` for completion — timeout-safe, notification-independent. |
+| `scripts/parallel-wait.sh` | **Parallel** Poll `.harness/agent-results/` for completion — timeout-safe, notification-independent. Auto-reconciles timed-out tasks against git evidence before giving up. |
+| `scripts/agent-register.sh` | **Supervision** Register a spawned agent's runtime `agentId` — mandatory, enables `TaskOutput`/`TaskStop` recovery even across context compaction. |
+| `scripts/task-reconcile.sh` | **Supervision** Ground-truth check: does a commit with `Task: <id>` trailer exist? Proves completion without needing a result file or a live agent. |
+| `scripts/task-class-timeout.sh` | **Supervision** Per-class timeout budget from trajectory p95, not one flat number for every task size. |
+| `scripts/harness-metrics.sh` | **Observability** Run-level golden signals: tasks in flight, stuck count, oldest agent age. |
 | `scripts/ci-generate.sh` | **CI** Generate `.github/workflows/harness-ci.yml` — runs harness scripts in CI, auto-deploys staging on PR. |
 | `scripts/deploy.sh` | **Deploy** Pluggable staging/production deploy via project `deploy-config.sh`. Staging auto, production explicit. |
 | `scripts/rollback.sh` | **Rollback** Auto-triggered by `deploy.sh` on health check failure. |
@@ -401,9 +405,13 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
       → Master stores test file paths in each task's DAG fe_contract field.
       User does NOT run any of these — master injects them into subagent context at loop time.
 
-3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending/files_touched/deps).
+3b. Write $PROJECT_ROOT/.harness/plan.dag.json: classify each task (class/model/effort/tdd/gate/split/status=pending/files_touched/deps/timeout_seconds).
    `files_touched` is critical for parallel grouping — estimate from task spec + plan file paths.
    `deps` is explicit dependency list (task IDs that must complete first).
+   `timeout_seconds` — per-class budget, NOT a flat global number:
+     Bash: scripts/task-class-timeout.sh "$PROJECT_ROOT/.harness" <class>
+     Uses historical p95 duration for that class when available, else a sane
+     class-appropriate default. Record in DAG so Step 8's WAIT PHASE uses it.
 
    After DAG is written, build parallel execution groups:
      Bash: python3 ~/.claude/skills/execution-harness/scripts/parallel-group-plan.py \
@@ -471,20 +479,37 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
              Then return normally."
 
        c. Spawn Agent(model=<from table>, effort=<from table>, prompt=<above>)
+          IMMEDIATELY after the call returns its agentId — MANDATORY, before doing
+          anything else with this task — register it:
+            bash ~/.claude/skills/execution-harness/scripts/agent-register.sh \
+              "$PROJECT_ROOT" "$TASK_ID" "<returned agentId>" "master"
+          An unregistered spawn cannot be recovered if it hangs — this is the #1
+          cause of "agent finished but the run never noticed" incidents. See
+          reference/autonomy.md § Supervision & Reconciliation.
 
      ── WAIT PHASE ──────────────────────────────────────────────────────
      # Do NOT rely solely on agent return notifications — they can be lost
      # due to context compaction, hook interference, or parallel race conditions.
      # Poll durable result files instead. Notifications are a bonus, not a guarantee.
 
+     GROUP_TIMEOUT = MAX(timeout_seconds across tasks in this group)   # from DAG, Step 3b
      bash ~/.claude/skills/execution-harness/scripts/parallel-wait.sh \
-       "$PROJECT_ROOT" 600 "$GROUP_ID" <task_ids in group...>
+       "$PROJECT_ROOT" "$GROUP_TIMEOUT" "$GROUP_ID" <task_ids in group...>
 
-     # Polls .harness/agent-results/<task_id>.json every 5s (up to 600s).
+     # Polls .harness/agent-results/<task_id>.json every 5s (up to GROUP_TIMEOUT).
      # Exit 0: all done. Read each result file for gate_result + files_changed_actual.
-     # Exit 1: timeout. Read .harness/parallel-wait-<group_id>.json:
-     #   {completed:[...], timed_out:[...], elapsed_seconds: N}
-     #   Surface timed-out tasks to user: re-run, extend timeout, or skip.
+     # Exit 1: on timeout, parallel-wait.sh ALREADY reconciles each still-pending task
+     #   against git evidence (task-reconcile.sh) before finalizing — a task whose agent
+     #   committed with the "Task: <id>" trailer but never wrote a result file is
+     #   reclassified `reconciled`, not `timed_out`. Read .harness/parallel-wait-<group_id>.json:
+     #     {completed:[...], reconciled:[...], timed_out:[...], elapsed_seconds: N}
+     #   `reconciled` tasks: treat exactly like `completed` — the commit already exists,
+     #     copy its evidence into the DAG (status=done) and move on. Do NOT re-run them.
+     #   `timed_out` tasks (no git evidence at all): run the FULL recovery procedure —
+     #     reference/autonomy.md § Supervision & Reconciliation (TaskOutput liveness check
+     #     → TaskStop if dead → discard worktree → re-spawn, capped at 3 attempts → BLOCKED).
+     #     Before surfacing to the user, run scripts/harness-metrics.sh for a golden-signal
+     #     snapshot instead of a bare "still waiting."
 
      ── CONFLICT CHECK (safety net) ─────────────────────────────────────
      Collect files_changed_actual from .harness/agent-results/<task_id>.json.
@@ -653,3 +678,9 @@ If a subagent returns `status: blocked`:
 - **Extracting an image inline on Opus/Fable** — image extraction is always Sonnet. On a pricey master, delegate to a Sonnet sub-agent. Never OCR/read an image on Opus.
 - **Taking a screenshot / surfing web inline on Opus/Fable** — summon a Sonnet sub-agent for the op and continue reasoning on the main model. Don't burn Opus tokens on browser I/O.
 - **Upgrading a browser/screenshot task above Sonnet without "pakai opus"** — Sonnet is the default and ceiling for browser ops unless the user explicitly overrides.
+- **Spawning an Agent without immediately registering its `agentId`** — an unregistered spawn is invisible to recovery. If it hangs, master has no way to check liveness (`TaskOutput`) or kill it (`TaskStop`). This is the #1 cause of "the run finished but nobody noticed" incidents.
+- **Treating `timed_out` as failure without reconciling first** — a task whose agent committed (gate PASS, proper `Task: <id>` trailer) but never wrote a result file is DONE, not stuck. `parallel-wait.sh` already reconciles automatically; never skip reading its `reconciled` list before acting on `timed_out`.
+- **Retrying a hung task with no cap** — apply the same K=3 failure-breaker used for gate failures. A task that hangs 3 times in a row is BLOCKED, surfaced to the user — never retried a 4th time silently.
+- **Flat global timeout regardless of task class** — a `security-core` task and a `mechanical-fan` rename do not deserve the same budget. Use `task-class-timeout.sh` at plan-time, not a hardcoded number.
+- **A coordinator subagent spawning workers without registering them** — supervision is transitive. Any layer that spawns MUST register, not just master. An unregistered grandchild agent is exactly as unrecoverable as an unregistered child.
+- **Killing a "stuck" agent without checking `TaskOutput` first** — it might just be slow, not dead. Check real liveness before `TaskStop`; only kill when genuinely unresponsive past the extended budget.

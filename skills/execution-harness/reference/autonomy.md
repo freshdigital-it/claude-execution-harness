@@ -32,6 +32,69 @@ Subagent writes ≤5-line root-cause reflection before retry:
 
 Max K retries with different strategies. After K → BLOCKED.
 
+## Supervision & Reconciliation (stuck-agent recovery)
+
+**Root cause this closes:** an agent finishes its work and commits (passing every gate),
+then hangs before writing its result file. The completion notification never arrives.
+Under the old model, master waits the full timeout and incorrectly reports a *done* task
+as *stuck* — because completion was signaled edge-triggered (a notification/file write
+that must happen exactly once) instead of level-triggered (state master can re-observe
+at any time). This is a supervision-tree gap, not a bug in one script.
+
+### Mandatory: register every spawn, immediately
+
+The instant any `Agent(...)` call returns its `agentId` — whether spawned by master
+directly OR by a coordinator subagent master delegated to — the spawner MUST call:
+```bash
+bash ~/.claude/skills/execution-harness/scripts/agent-register.sh \
+  "$PROJECT_ROOT" "$TASK_ID" "$AGENT_ID" "master"        # or "coordinator:<coordinator_agent_id>"
+```
+This writes `.harness/agent-registry.json`. It is the durable link that lets ANY layer
+— master, even after context compaction, even if the coordinator that did the spawning
+has itself since exited — later ask the runtime "is this specific agent still alive?"
+via `TaskOutput(task_id: <agent_id>, block: false, timeout: 0)`, or kill it via
+`TaskStop(task_id: <agent_id>)`. **An unregistered spawn is invisible to recovery.**
+If a coordinator pattern is used, the coordinator inherits this same obligation for
+every agent it spawns — supervision is transitive, not just master's problem.
+
+### Recovery procedure — when `parallel-wait.sh` reports `timed_out`
+
+`parallel-wait.sh` already reconciles against git evidence automatically on timeout
+(a task with a commit bearing the `Task: <id>` trailer is reclassified `reconciled`,
+not `timed_out` — see its output JSON). What remains in `timed_out` after that has
+**no git-provable completion**. For each:
+
+```
+1. Look up agent_id in .harness/agent-registry.json for this task_id.
+2. If agent_id known:
+   TaskOutput(task_id: <agent_id>, block: false, timeout: 0)
+   - still running, under 2x the task's timeout_seconds → not stuck, just slow.
+     Extend once; re-run parallel-wait.sh for the remaining group.
+   - not running / errored / unknown → genuinely dead. Proceed to step 3.
+3. Dead (or agent_id was never registered — treat as dead, same as unsupervised):
+   - If agent_id known: TaskStop(task_id: <agent_id>) — best-effort cleanup, ignore failure.
+   - Discard its worktree: worktree-teardown.sh ... "" --no-commit
+     (safe — our worktree isolation means nothing not already gate-PASSed was ever
+     committed, so discarding loses no validated work).
+   - Re-spawn the SAME task_id fresh (idempotent: the Commit Convention's Task: trailer
+     means even if some earlier partial commit slipped through, task-reconcile.sh would
+     have already caught it before reaching this branch).
+4. Failure-breaker for hangs (mirrors gate-failure K=3): cap re-spawns per task_id at 3.
+   3rd dead/hang cycle → mark task BLOCKED, surface the gathered evidence
+   (registry entry, TaskOutput result, reconcile verdict) to the user. Never loop forever —
+   one hung task must not silently retry forever nor silently hold up the whole run.
+```
+
+### Observability
+
+Before surfacing a `timed_out` verdict to the user, run:
+```bash
+bash ~/.claude/skills/execution-harness/scripts/harness-metrics.sh "$PROJECT_ROOT/.harness"
+```
+Snapshot of `tasks_in_flight`, `stuck_count`, `oldest_agent_age_seconds` — include in the
+message to the user instead of a bare "still waiting." This is the harness's own golden
+signal, closing the same blind spot `observability.md` closes for shipped applications.
+
 ## Model + effort routing
 
 ```
