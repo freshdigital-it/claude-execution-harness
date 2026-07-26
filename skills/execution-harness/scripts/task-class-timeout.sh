@@ -62,7 +62,12 @@ if len(durations) < 3:
     sys.exit(0)
 
 durations.sort()
-idx = max(0, int(len(durations) * 0.95) - 1)
+# Nearest-rank percentile: rank = ceil(P/100 * N), 1-indexed into the sorted
+# array. The prior `int(n*0.95)-1` formula degenerates toward the MEDIAN at
+# small n (e.g. n=3 gives index 1, not the top sample) instead of p95 — a
+# math.ceil is required to land on the correct high-end rank.
+import math
+idx = max(0, math.ceil(len(durations) * 0.95) - 1)
 p95 = durations[idx]
 budget = int(p95 * 1.2)
 # Never let history push the budget below a sane floor or absurdly high.

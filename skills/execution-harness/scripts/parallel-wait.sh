@@ -7,9 +7,27 @@
 # Does NOT rely on agent notifications — those can be lost due to context
 # compaction, hook interference, or parallel completion race conditions.
 #
-# Exit 0: all tasks have result files (all agents completed)
-# Exit 1: timeout — partial results; caller reads .harness/parallel-wait-<group>.json
-# Exit 2: no task IDs provided
+# On timeout, each still-pending task is reconciled in two stages:
+#   1. worktree-reconcile.sh (PRIMARY) — does the task's isolated worktree
+#      have uncommitted changes? This is the actual failure mode this
+#      harness produces (agents never run git; only master commits, and
+#      only after this wait phase) — evidence of real work with NO gate
+#      verification yet. -> bucket "unverified". NEVER auto-completed.
+#   2. task-reconcile.sh (SECONDARY) — does a "Task: <id>" commit already
+#      exist on this run's branch? Gate-PASS-proven (Commit Convention).
+#      Mainly fires on RESUME (a prior session already committed this task)
+#      or a coordinator-commits-on-behalf-of-agents pattern. -> "reconciled".
+#   Neither -> "timed_out": no evidence at all, genuinely stuck/dead.
+#
+# Exit 0: every task is TRUSTWORTHY-resolved — has a result file
+#         (completed) or a git-proven commit (reconciled). Nothing pending.
+# Exit 1: at least one task is NOT trustworthy-resolved — either
+#         "unverified" (worktree has unproven work; master must re-verify
+#         the gate or ask a human before treating it as done) or
+#         "timed_out" (no evidence at all; follow the recovery procedure
+#         in reference/autonomy.md). Caller reads
+#         .harness/parallel-wait-<group>.json to see which.
+# Exit 2: no task IDs provided.
 
 set -euo pipefail
 
@@ -31,6 +49,41 @@ log "Waiting for ${#TASK_IDS[@]} tasks (timeout=${TIMEOUT}s, poll=${POLL_INTERVA
 mkdir -p "$RESULTS_DIR"
 START=$(date +%s)
 
+# bash 3.2 (macOS default) note, applies to every array-to-argv expansion
+# below: "${arr[@]:-}" on an EMPTY array injects one phantom empty-string
+# argument (not zero args), silently corrupting downstream argv-index-based
+# logic. "${arr[@]}" alone throws "unbound variable" under set -u on an
+# empty array. The only form correct in both cases (0 args for empty, N for
+# non-empty, no error) is `${arr[@]+"${arr[@]}"}` — used throughout.
+
+write_output() {
+    local completed_json="$1" reconciled_json="$2" unverified_json="$3" timed_out_json="$4" elapsed="$5"
+    python3 - "$completed_json" "$reconciled_json" "$unverified_json" "$timed_out_json" "$elapsed" "$WAIT_OUT" <<'PYEOF'
+import json, os, sys
+completed, reconciled, unverified, timed_out, elapsed, out_path = sys.argv[1:7]
+data = {
+    "completed": json.loads(completed),
+    "reconciled": json.loads(reconciled),
+    "unverified": json.loads(unverified),
+    "timed_out": json.loads(timed_out),
+    "elapsed_seconds": int(elapsed),
+}
+tmp = out_path + ".tmp"
+with open(tmp, "w") as f:
+    f.write(json.dumps(data, indent=2))
+os.replace(tmp, out_path)
+PYEOF
+}
+
+to_json_arg() {
+    # Encode the given args to exactly one JSON-array argv string — sidesteps
+    # all positional-splicing arithmetic regardless of how many elements.
+    # NOTE: deliberately takes args via "$@", NOT a nameref (`local -n`) —
+    # namerefs require bash 4.3+ and macOS ships bash 3.2 by default. Call
+    # as: to_json_arg ${ARR[@]+"${ARR[@]}"}
+    python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@"
+}
+
 while true; do
     ELAPSED=$(( $(date +%s) - START ))
     COMPLETED=(); PENDING=()
@@ -42,25 +95,21 @@ while true; do
 
     if [[ ${#PENDING[@]} -eq 0 ]]; then
         log "All tasks completed in ${ELAPSED}s."
-        python3 -c "
-import json,os,sys
-data={'completed':sys.argv[1:],'timed_out':[],'elapsed_seconds':$ELAPSED}
-tmp='$WAIT_OUT.tmp'
-open(tmp,'w').write(json.dumps(data,indent=2)); os.replace(tmp,'$WAIT_OUT')
-" "${COMPLETED[@]}"
+        COMPLETED_JSON=$(to_json_arg ${COMPLETED[@]+"${COMPLETED[@]}"})
+        write_output "$COMPLETED_JSON" "[]" "[]" "[]" "$ELAPSED"
         exit 0
     fi
 
     if [[ $ELAPSED -ge $TIMEOUT ]]; then
-        log "TIMEOUT ${ELAPSED}s. done=${COMPLETED[*]:-none}  checking git evidence for: ${PENDING[*]}"
+        log "TIMEOUT ${ELAPSED}s. done=${COMPLETED[*]:-none}  reconciling: ${PENDING[*]}"
 
-        # Before declaring these stuck, reconcile against git — a task whose
-        # agent committed (Task: <id> trailer) but never wrote a result file
-        # or whose notification was lost is NOT stuck, it's DONE_UNREPORTED.
-        RECONCILED=(); STILL_STUCK=()
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        RECONCILED=(); UNVERIFIED=(); STILL_STUCK=()
         for tid in "${PENDING[@]}"; do
-            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            if bash "$SCRIPT_DIR/task-reconcile.sh" "$PROJECT_ROOT" "$tid" >/dev/null 2>&1; then
+            if bash "$SCRIPT_DIR/worktree-reconcile.sh" "$PROJECT_ROOT" "$tid" >/dev/null 2>&1; then
+                log "  $tid: WORK_FOUND_UNVERIFIED (worktree has uncommitted changes) — master must re-verify, NOT auto-completed"
+                UNVERIFIED+=("$tid")
+            elif bash "$SCRIPT_DIR/task-reconcile.sh" "$PROJECT_ROOT" "$tid" >/dev/null 2>&1; then
                 log "  $tid: RECONCILED via git evidence (commit found) — treating as completed"
                 RECONCILED+=("$tid")
             else
@@ -68,31 +117,15 @@ open(tmp,'w').write(json.dumps(data,indent=2)); os.replace(tmp,'$WAIT_OUT')
             fi
         done
 
-        log "Final: completed=${#COMPLETED[@]}  reconciled=${#RECONCILED[@]}  still_stuck=${#STILL_STUCK[@]}"
+        log "Final: completed=${#COMPLETED[@]}  reconciled=${#RECONCILED[@]}  unverified=${#UNVERIFIED[@]}  still_stuck=${#STILL_STUCK[@]}"
 
-        # bash 3.2 (macOS default) note: "${arr[@]:-}" on an EMPTY array injects
-        # one phantom empty-string argument (not zero args) — it shifts every
-        # subsequent positional argv and silently corrupts the categorization.
-        # "${arr[@]}" on an empty array instead throws "unbound variable" under
-        # set -u. The only form that is correct in BOTH cases (0 args for empty,
-        # N args for non-empty, no error) is `${arr[@]+"${arr[@]}"}`.
-        # Each category is JSON-encoded to exactly ONE argv string, so there is
-        # no positional splicing to get wrong regardless of how many are empty.
-        COMPLETED_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${COMPLETED[@]+"${COMPLETED[@]}"})
-        RECONCILED_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${RECONCILED[@]+"${RECONCILED[@]}"})
-        STUCK_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${STILL_STUCK[@]+"${STILL_STUCK[@]}"})
+        COMPLETED_JSON=$(to_json_arg ${COMPLETED[@]+"${COMPLETED[@]}"})
+        RECONCILED_JSON=$(to_json_arg ${RECONCILED[@]+"${RECONCILED[@]}"})
+        UNVERIFIED_JSON=$(to_json_arg ${UNVERIFIED[@]+"${UNVERIFIED[@]}"})
+        STUCK_JSON=$(to_json_arg ${STILL_STUCK[@]+"${STILL_STUCK[@]}"})
+        write_output "$COMPLETED_JSON" "$RECONCILED_JSON" "$UNVERIFIED_JSON" "$STUCK_JSON" "$ELAPSED"
 
-        python3 -c "
-import json,os,sys
-completed=json.loads(sys.argv[1])
-reconciled=json.loads(sys.argv[2])
-timed_out=json.loads(sys.argv[3])
-data={'completed':completed,'reconciled':reconciled,'timed_out':timed_out,'elapsed_seconds':$ELAPSED}
-tmp='$WAIT_OUT.tmp'
-open(tmp,'w').write(json.dumps(data,indent=2)); os.replace(tmp,'$WAIT_OUT')
-" "$COMPLETED_JSON" "$RECONCILED_JSON" "$STUCK_JSON"
-
-        [[ ${#STILL_STUCK[@]} -eq 0 ]] && exit 0
+        [[ ${#UNVERIFIED[@]} -eq 0 && ${#STILL_STUCK[@]} -eq 0 ]] && exit 0
         exit 1
     fi
 

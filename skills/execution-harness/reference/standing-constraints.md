@@ -102,6 +102,11 @@ Omitting either causes subagent to inherit parent session defaults — breaking 
    `scripts/trajectory-append.sh "$PROJECT_ROOT/.harness" '<row_json>'` using the
    subagent's returned `{status, summary, approach, reflection}`. Required fields:
    `task_id, class, status, gate_result`. This is enforced at Stop by `harness-runend-guard.sh`.
+   **`duration_seconds`:** read `spawned_at` from `.harness/agents/<task_id>.json` (written by
+   `agent-register.sh` at spawn time), compute `now - spawned_at` in seconds, include it in the
+   row. This is not optional bookkeeping — `task-class-timeout.sh`'s per-class p95 timeout
+   budget has zero data to learn from without it, and silently falls back to the built-in
+   default forever.
    **`tokens_est`:** try Agent result metadata field `subagent_tokens` first (unverified — may not
    exist in all runtime versions). If absent or zero, fall back to class constant:
    `mechanical-fan=50000, business=60000, security-core=80000, refactor=40000`. Label the value as

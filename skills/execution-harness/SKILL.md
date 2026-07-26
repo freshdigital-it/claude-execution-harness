@@ -185,9 +185,10 @@ EOF
 | `scripts/worktree-setup.sh` | **Parallel** Create detached-HEAD git worktree + register file claims + install `.harness-write.sh` in worktree. |
 | `scripts/worktree-teardown.sh` | **Parallel** Copy agent output to main project + commit (serialized) + remove worktree + release claims. |
 | `scripts/agent-result-write.sh` | **Parallel** Agent calls this when done — writes durable result file master polls for completion. |
-| `scripts/parallel-wait.sh` | **Parallel** Poll `.harness/agent-results/` for completion — timeout-safe, notification-independent. Auto-reconciles timed-out tasks against git evidence before giving up. |
-| `scripts/agent-register.sh` | **Supervision** Register a spawned agent's runtime `agentId` — mandatory, enables `TaskOutput`/`TaskStop` recovery even across context compaction. |
-| `scripts/task-reconcile.sh` | **Supervision** Ground-truth check: does a commit with `Task: <id>` trailer exist? Proves completion without needing a result file or a live agent. |
+| `scripts/parallel-wait.sh` | **Parallel** Poll `.harness/agent-results/` for completion — timeout-safe, notification-independent. Auto-reconciles timed-out tasks (worktree state, then git evidence) before giving up. |
+| `scripts/agent-register.sh` | **Supervision** Register a spawned agent's runtime `agentId` (one file per task_id, race-free) — mandatory, enables `TaskOutput`/`TaskStop` recovery even across context compaction. |
+| `scripts/worktree-reconcile.sh` | **Supervision** PRIMARY ground-truth check: does the task's isolated worktree have uncommitted changes? Evidence of real work — NOT proof of a passed gate. |
+| `scripts/task-reconcile.sh` | **Supervision** SECONDARY ground-truth check, scoped to this run's branch: does a commit with an exact `Task: <id>` trailer line exist? Proves completion (Commit Convention: only gate PASS earns a commit) without needing a result file or a live agent. |
 | `scripts/task-class-timeout.sh` | **Supervision** Per-class timeout budget from trajectory p95, not one flat number for every task size. |
 | `scripts/harness-metrics.sh` | **Observability** Run-level golden signals: tasks in flight, stuck count, oldest agent age. |
 | `scripts/ci-generate.sh` | **CI** Generate `.github/workflows/harness-ci.yml` — runs harness scripts in CI, auto-deploys staging on PR. |
@@ -357,6 +358,9 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
 2. Bash: PROJECT_ROOT=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null || pwd) && mkdir -p "$PROJECT_ROOT/.harness" && echo "$PROJECT_ROOT"
    → store result as PROJECT_ROOT; use absolute paths for ALL subsequent writes
 2b. Set `RUN_ID="run-$(date +%Y%m%d-%H%M%S)"`. Use it as the `run_id` field in every trajectory row this run.
+    Write `.harness/run-meta.json`: `{"run_id": "$RUN_ID", "base_sha": "$(git merge-base origin/main HEAD 2>/dev/null || git merge-base origin/master HEAD 2>/dev/null || git rev-parse HEAD)", "branch": "$(git branch --show-current)"}`.
+    `base_sha` is what `task-reconcile.sh` scopes its git-log search to (never unscoped full history — that produced stale cross-run false positives). Recording it explicitly here means reconciliation doesn't have to re-guess origin/main at query time.
+    If this is a FRESH run (Step 3's `plan.dag.json` did not already exist — i.e. not a resume): clear stale supervision state left by a prior aborted run on this same `PROJECT_ROOT` — `rm -rf "$PROJECT_ROOT/.harness/agents"` and reset `.harness/file-claims.json` to `{"active": {}}`. On RESUME, do NOT clear — prior registrations may still be needed.
 
 [AMBIGUITY CHECK — run before writing DAG]
 2c. Scan the plan for anything unclear: missing acceptance criteria, ambiguous scope,
@@ -482,10 +486,16 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
           IMMEDIATELY after the call returns its agentId — MANDATORY, before doing
           anything else with this task — register it:
             bash ~/.claude/skills/execution-harness/scripts/agent-register.sh \
-              "$PROJECT_ROOT" "$TASK_ID" "<returned agentId>" "master"
+              "$PROJECT_ROOT" "$TASK_ID" "<returned agentId>" "master" "$RUN_ID"
           An unregistered spawn cannot be recovered if it hangs — this is the #1
           cause of "agent finished but the run never noticed" incidents. See
           reference/autonomy.md § Supervision & Reconciliation.
+
+          Then update the DAG: set this task's `status` to `in_progress` (in
+          `plan.dag.json`). This is NOT optional bookkeeping — `harness-metrics.sh`
+          filters on `status == "in_progress"` to compute `tasks_in_flight` /
+          `stuck_count` / `oldest_agent_age_seconds`; skip this and those signals
+          are permanently zero regardless of what's actually running.
 
      ── WAIT PHASE ──────────────────────────────────────────────────────
      # Do NOT rely solely on agent return notifications — they can be lost
@@ -497,19 +507,31 @@ When plan is confirmed (Phase 0 complete or plan already existed), master runs:
        "$PROJECT_ROOT" "$GROUP_TIMEOUT" "$GROUP_ID" <task_ids in group...>
 
      # Polls .harness/agent-results/<task_id>.json every 5s (up to GROUP_TIMEOUT).
-     # Exit 0: all done. Read each result file for gate_result + files_changed_actual.
-     # Exit 1: on timeout, parallel-wait.sh ALREADY reconciles each still-pending task
-     #   against git evidence (task-reconcile.sh) before finalizing — a task whose agent
-     #   committed with the "Task: <id>" trailer but never wrote a result file is
-     #   reclassified `reconciled`, not `timed_out`. Read .harness/parallel-wait-<group_id>.json:
-     #     {completed:[...], reconciled:[...], timed_out:[...], elapsed_seconds: N}
-     #   `reconciled` tasks: treat exactly like `completed` — the commit already exists,
-     #     copy its evidence into the DAG (status=done) and move on. Do NOT re-run them.
-     #   `timed_out` tasks (no git evidence at all): run the FULL recovery procedure —
-     #     reference/autonomy.md § Supervision & Reconciliation (TaskOutput liveness check
-     #     → TaskStop if dead → discard worktree → re-spawn, capped at 3 attempts → BLOCKED).
-     #     Before surfacing to the user, run scripts/harness-metrics.sh for a golden-signal
-     #     snapshot instead of a bare "still waiting."
+     # Exit 0: every task is TRUSTWORTHY-resolved (completed or reconciled). Nothing pending.
+     # Exit 1: at least one task is NOT trustworthy-resolved — read
+     #   .harness/parallel-wait-<group_id>.json:
+     #     {completed:[...], reconciled:[...], unverified:[...], timed_out:[...], elapsed_seconds: N}
+     #   On timeout, parallel-wait.sh reconciles each still-pending task in TWO stages before
+     #   finalizing — worktree-reconcile.sh FIRST (primary — checks the task's isolated
+     #   worktree for uncommitted changes), then task-reconcile.sh (secondary — checks git log
+     #   for a "Task: <id>" trailer commit, scoped to this run's branch):
+     #   `completed`  — result file exists. Read gate_result + files_changed_actual, proceed normally.
+     #   `reconciled` — git-proven done (Commit Convention guarantees the commit only exists
+     #     after gate PASS). Treat exactly like `completed` — copy evidence into DAG
+     #     (status=done) and move on. Do NOT re-run them.
+     #   `unverified`  — the task's worktree has uncommitted changes but NO commit. This is
+     #     EVIDENCE of work, NOT proof of a passed gate. Never auto-complete. Master must
+     #     either re-run the deterministic gate against the worktree's current file state and
+     #     THEN commit via worktree-teardown.sh normally if it passes, or surface to the user
+     #     for a decision if the gate can't be re-run mechanically (e.g. needs the agent's own
+     #     judgment). Do NOT silently treat `unverified` as `reconciled` — that ships unvetted work.
+     #   `timed_out` — no evidence at all (clean/missing worktree, no commit). Run the FULL
+     #     recovery procedure — reference/autonomy.md § Supervision & Reconciliation
+     #     (TaskOutput liveness check → TaskStop if dead → discard worktree (--no-commit, a
+     #     REAL discard — nothing is copied into the main tree) → re-spawn, capped at 3
+     #     attempts via the DAG's durable `attempts` field → BLOCKED).
+     #   Before surfacing to the user, run scripts/harness-metrics.sh for a golden-signal
+     #   snapshot instead of a bare "still waiting."
 
      ── CONFLICT CHECK (safety net) ─────────────────────────────────────
      Collect files_changed_actual from .harness/agent-results/<task_id>.json.
@@ -680,6 +702,8 @@ If a subagent returns `status: blocked`:
 - **Upgrading a browser/screenshot task above Sonnet without "pakai opus"** — Sonnet is the default and ceiling for browser ops unless the user explicitly overrides.
 - **Spawning an Agent without immediately registering its `agentId`** — an unregistered spawn is invisible to recovery. If it hangs, master has no way to check liveness (`TaskOutput`) or kill it (`TaskStop`). This is the #1 cause of "the run finished but nobody noticed" incidents.
 - **Treating `timed_out` as failure without reconciling first** — a task whose agent committed (gate PASS, proper `Task: <id>` trailer) but never wrote a result file is DONE, not stuck. `parallel-wait.sh` already reconciles automatically; never skip reading its `reconciled` list before acting on `timed_out`.
+- **Treating `unverified` as `reconciled`** — worktree evidence of activity is NOT proof of a passed gate (unlike a commit, which the Commit Convention guarantees only exists after gate PASS). Auto-completing an `unverified` task ships work nobody checked. Re-run the gate against the worktree, or ask a human — never silently promote it to done.
+- **Using an unregistered agent_id as proof of death** — no registry entry does not mean the agent is dead; registration itself can race or fail. Always run `worktree-reconcile.sh` before discarding or re-spawning — a worktree with uncommitted changes means real work is at stake even with no registry entry.
 - **Retrying a hung task with no cap** — apply the same K=3 failure-breaker used for gate failures. A task that hangs 3 times in a row is BLOCKED, surfaced to the user — never retried a 4th time silently.
 - **Flat global timeout regardless of task class** — a `security-core` task and a `mechanical-fan` rename do not deserve the same budget. Use `task-class-timeout.sh` at plan-time, not a hardcoded number.
 - **A coordinator subagent spawning workers without registering them** — supervision is transitive. Any layer that spawns MUST register, not just master. An unregistered grandchild agent is exactly as unrecoverable as an unregistered child.

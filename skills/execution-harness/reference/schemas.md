@@ -48,7 +48,9 @@ Tulis di plan-time, update per-task, jadi sumber resume deterministik.
 | `gate` | `deferred-verify` / `pipeline` / `auto` / `conformance` / `conformance+fe-journey` / `auto+fixtures` / `GAN` | derived from class |
 | `fe_contract` | path string — e.g. `"ux-contracts/invoice-list.yaml"` | master at plan-time for fe-* classes. Only set for `status: approved` contracts. |
 | `split` | `true` if file >500 lines and must be split first | master at plan-time |
-| `status` | `pending` / `in-progress` / `done` / `blocked` / `failed` | master updates per-task |
+| `status` | `pending` / `in_progress` / `done` / `blocked` / `failed` | master updates per-task — set to `in_progress` immediately after spawn+register (SKILL.md Step 8c); `harness-metrics.sh` filters on this exact string, underscore not hyphen |
+| `timeout_seconds` | int — per-class budget from `task-class-timeout.sh` | master at plan-time (Step 3b) |
+| `attempts` | int, default `0` — durable count of hang/death re-spawns for this task_id | master, incremented each time the recovery procedure (autonomy.md § Supervision & Reconciliation) re-spawns after a dead/hung agent. Lives in the DAG (not just master's in-context reasoning) so the K=3 cap survives context compaction — a transient counter would reset to 0 and retry forever across compactions. |
 | `blocked_reason` | string — mengapa subagent tidak bisa lanjut tanpa klarifikasi | subagent returns, master copies |
 | `assumption_if_unblocked` | string — apa yang akan diasumsikan jika user minta lanjut tanpa jawaban | subagent returns |
 | `note` | string — frontier decision reason, user clarification answer, atau catatan lain | master |
@@ -124,6 +126,7 @@ Append-only per-task trace. One compact JSON object per line. Location: `<projec
 | `gate_findings` | int | no | Count of findings |
 | `reflection` | string | no | Root-cause or lesson from this task |
 | `tokens_est` | int | no | Estimated tokens. **Source:** try `subagent_tokens` from Agent result metadata first; if absent (unverified field — may not exist), use class constant: mechanical-fan=50000, business=60000, security-core=80000, refactor=40000. Label as "estimated" in that case. |
+| `duration_seconds` | int | no | Wall-clock seconds from spawn to close. **Source:** `now - spawned_at` from `.harness/agents/<task_id>.json` (written by `agent-register.sh` at spawn time). Without this field, `task-class-timeout.sh`'s p95-based per-class timeout budget has no data to compute from and silently falls back to the built-in default forever — always populate it. |
 | `status` | string | **yes** | "done", "failed", "reverted", "blocked" |
 | `assumptions` | array of string | no | Asumsi yang dibuat subagent. `[]` jika tidak ada. Jangan omit jika ada asumsi — diaudit di review. |
 

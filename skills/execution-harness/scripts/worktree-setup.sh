@@ -26,15 +26,25 @@ log() { echo "[worktree-setup] $*" >&2; }
 mkdir -p "$PROJECT_ROOT/.harness"
 
 # ── Register file claims (atomic) ─────────────────────────────────────────────
-FILES_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "${FILES_CLAIMED[@]:-}")
+# bash 3.2 (macOS default) note: "${arr[@]:-}" on an EMPTY array injects one
+# phantom empty-string argument (not zero args) instead of expanding to
+# nothing — it silently corrupted this exact call before (two tasks with
+# empty files_touched produced phantom [''] claims that falsely conflicted
+# with each other). The only form correct in both cases (0 args for empty,
+# N args for non-empty, no error under set -u) is `${arr[@]+"${arr[@]}"}`.
+FILES_JSON=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" ${FILES_CLAIMED[@]+"${FILES_CLAIMED[@]}"})
 
-python3 << PYEOF
-import json, os, sys
+# FILES_JSON is passed via argv and parsed with json.loads — never
+# interpolated into Python source text. (A prior version embedded it
+# directly as `set($FILES_JSON)`, relying on JSON/Python list-literal syntax
+# happening to coincide; that's the same class of risk as the RCE fixed in
+# task-reconcile.sh, avoided here on principle even though no concrete
+# exploit was demonstrated for this specific call site.)
+python3 - "$CLAIMS_FILE" "$TASK_ID" "$WORKTREE_PATH" "$FILES_JSON" <<'PYEOF'
+import json, os, sys, tempfile
 
-claims_path = "$CLAIMS_FILE"
-task_id     = "$TASK_ID"
-worktree    = "$WORKTREE_PATH"
-new_files   = set($FILES_JSON)
+claims_path, task_id, worktree, files_json = sys.argv[1:5]
+new_files = set(json.loads(files_json))
 
 claims = {}
 if os.path.exists(claims_path):
@@ -43,6 +53,11 @@ if os.path.exists(claims_path):
 claims.setdefault("active", {})
 
 for active_id, info in claims["active"].items():
+    if active_id == task_id:
+        # Re-spawning the SAME task_id (e.g. after a crashed teardown left a
+        # stale claim behind) must not self-conflict against its own prior
+        # claim — only cross-task overlaps are real conflicts.
+        continue
     overlap = new_files & set(info.get("files", []))
     if overlap:
         print(f"ERROR: file conflict: {task_id} vs {active_id}: {sorted(overlap)}", file=sys.stderr)
@@ -54,8 +69,9 @@ claims["active"][task_id] = {
     "status":   "running",
 }
 
-tmp = claims_path + ".tmp"
-with open(tmp, "w") as f:
+claims_dir = os.path.dirname(claims_path) or "."
+fd, tmp = tempfile.mkstemp(dir=claims_dir, prefix=".file-claims.", suffix=".tmp")
+with os.fdopen(fd, "w") as f:
     json.dump(claims, f, indent=2)
 os.replace(tmp, claims_path)
 print(f"[worktree-setup] claimed {len(new_files)} files for {task_id}", file=sys.stderr)

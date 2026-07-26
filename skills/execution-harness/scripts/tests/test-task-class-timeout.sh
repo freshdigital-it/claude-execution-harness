@@ -26,7 +26,21 @@ done
 echo '{"task_id":"y","class":"fe-page","status":"done","gate_result":"pass","duration_seconds":9999}' >> "$TMP/trajectory.jsonl"
 
 V4=$(bash "$SCRIPT" "$TMP" "business")
-# sorted [100,100,100,100,500], idx=int(5*0.95)-1=3 -> p95=100 -> *1.2=120
-[ "$V4" = "120" ] || fail "expected p95-derived 120 for business, got $V4"
+# Nearest-rank p95: sorted [100,100,100,100,500], rank=ceil(5*0.95)=5, idx=4 -> p95=500 -> *1.2=600.
+# (The old `int(n*0.95)-1` formula gave idx=3 -> p95=100 -> 120, which was actually the
+# MEDIAN, not p95 — this value regression-guards the off-by-one fix.)
+[ "$V4" = "600" ] || fail "expected p95-derived 600 for business, got $V4"
+
+# A second, more discriminating dataset — old formula and correct formula disagree at n=4
+# with DISTINCT values (both landed on "100" above only because 4 of 5 samples happened
+# to be equal). Values kept above the 60s floor so the floor clamp can't mask the fix.
+rm -f "$TMP/trajectory.jsonl"
+for d in 100 200 300 400; do
+  echo "{\"task_id\":\"z\",\"class\":\"bugfix\",\"status\":\"done\",\"gate_result\":\"pass\",\"duration_seconds\":$d}" >> "$TMP/trajectory.jsonl"
+done
+V5=$(bash "$SCRIPT" "$TMP" "bugfix")
+# sorted [100,200,300,400], rank=ceil(4*0.95)=4, idx=3 -> p95=400 -> *1.2=480
+# (old buggy formula: idx=int(4*0.95)-1=2 -> p95=300 -> *1.2=360 — the median-leaning wrong answer)
+[ "$V5" = "480" ] || fail "expected p95-derived 480 (not the old buggy 360) for bugfix, got $V5"
 
 echo "PASS test-task-class-timeout"

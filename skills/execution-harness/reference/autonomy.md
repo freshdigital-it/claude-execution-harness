@@ -34,12 +34,23 @@ Max K retries with different strategies. After K → BLOCKED.
 
 ## Supervision & Reconciliation (stuck-agent recovery)
 
-**Root cause this closes:** an agent finishes its work and commits (passing every gate),
-then hangs before writing its result file. The completion notification never arrives.
-Under the old model, master waits the full timeout and incorrectly reports a *done* task
-as *stuck* — because completion was signaled edge-triggered (a notification/file write
-that must happen exactly once) instead of level-triggered (state master can re-observe
-at any time). This is a supervision-tree gap, not a bug in one script.
+**Root cause this closes:** an agent does real work in its isolated worktree and then
+goes silent — hangs, crashes, or loses its notification — before either writing its
+result file or (rarer: resume, or a coordinator committing on an agent's behalf)
+committing. The completion/failure signal never arrives. Under the old model, master
+waits the full timeout and incorrectly reports a *done* (or *in-progress-with-real-work*)
+task as flatly *stuck* — because completion was signaled edge-triggered (a
+notification/file write that must happen exactly once) instead of level-triggered (state
+master can re-observe at any time, from the worktree itself). This is a supervision-tree
+gap, not a bug in one script.
+
+**Why worktree state, not git log, is the primary check:** this harness's own documented
+workflow forbids agents from running git commands — only master commits, and only AFTER
+the wait phase that triggers reconciliation. So a task with real, valid, ready-to-commit
+work sitting in its worktree leaves **no git trace whatsoever** until master's own
+teardown commits it. Searching git log for that task can only ever find a commit from a
+*prior* session/run (resume) — never evidence from the *current* hang. The worktree
+itself is the only place the evidence of a live-but-silent agent's work actually is.
 
 ### Mandatory: register every spawn, immediately
 
@@ -47,53 +58,87 @@ The instant any `Agent(...)` call returns its `agentId` — whether spawned by m
 directly OR by a coordinator subagent master delegated to — the spawner MUST call:
 ```bash
 bash ~/.claude/skills/execution-harness/scripts/agent-register.sh \
-  "$PROJECT_ROOT" "$TASK_ID" "$AGENT_ID" "master"        # or "coordinator:<coordinator_agent_id>"
+  "$PROJECT_ROOT" "$TASK_ID" "$AGENT_ID" "master" "$RUN_ID"   # or "coordinator:<coordinator_agent_id>"
 ```
-This writes `.harness/agent-registry.json`. It is the durable link that lets ANY layer
-— master, even after context compaction, even if the coordinator that did the spawning
-has itself since exited — later ask the runtime "is this specific agent still alive?"
-via `TaskOutput(task_id: <agent_id>, block: false, timeout: 0)`, or kill it via
-`TaskStop(task_id: <agent_id>)`. **An unregistered spawn is invisible to recovery.**
-If a coordinator pattern is used, the coordinator inherits this same obligation for
+This writes `.harness/agents/<task_id>.json` (one file per task — concurrent registration
+of different tasks is race-free by construction, unlike a single shared registry file).
+It is the durable link that lets ANY layer — master, even after context compaction, even
+if the coordinator that did the spawning has itself since exited — later ask the runtime
+"is this specific agent still alive?" via `TaskOutput(task_id: <agent_id>, block: false,
+timeout: 0)`, or kill it via `TaskStop(task_id: <agent_id>)`.
+
+**An unregistered spawn is invisible to `TaskOutput`/`TaskStop` — but is NOT proof of
+death.** Registration itself can race, fail, or never have been called correctly.
+**Never treat "no registry entry" as equivalent to "agent is dead."** Always run
+`worktree-reconcile.sh` before any destructive action (discard, re-spawn) — a worktree
+with uncommitted changes means real work is at stake regardless of what the registry says.
+If a coordinator pattern is used, the coordinator inherits the registration obligation for
 every agent it spawns — supervision is transitive, not just master's problem.
 
-### Recovery procedure — when `parallel-wait.sh` reports `timed_out`
+### Recovery procedure — when `parallel-wait.sh` reports non-`completed` tasks
 
-`parallel-wait.sh` already reconciles against git evidence automatically on timeout
-(a task with a commit bearing the `Task: <id>` trailer is reclassified `reconciled`,
-not `timed_out` — see its output JSON). What remains in `timed_out` after that has
-**no git-provable completion**. For each:
+`parallel-wait.sh` already runs a two-stage reconciliation on every still-pending task at
+timeout — worktree-reconcile.sh first (primary — is there uncommitted work in the task's
+worktree?), then task-reconcile.sh (secondary — is there already a `Task: <id>` commit on
+this run's branch, scoped to this run so a stale commit from a different run can never
+match?). Read `.harness/parallel-wait-<group_id>.json` and branch on which bucket:
 
 ```
-1. Look up agent_id in .harness/agent-registry.json for this task_id.
-2. If agent_id known:
-   TaskOutput(task_id: <agent_id>, block: false, timeout: 0)
-   - still running, under 2x the task's timeout_seconds → not stuck, just slow.
-     Extend once; re-run parallel-wait.sh for the remaining group.
-   - not running / errored / unknown → genuinely dead. Proceed to step 3.
-3. Dead (or agent_id was never registered — treat as dead, same as unsupervised):
-   - If agent_id known: TaskStop(task_id: <agent_id>) — best-effort cleanup, ignore failure.
-   - Discard its worktree: worktree-teardown.sh ... "" --no-commit
-     (safe — our worktree isolation means nothing not already gate-PASSed was ever
-     committed, so discarding loses no validated work).
-   - Re-spawn the SAME task_id fresh (idempotent: the Commit Convention's Task: trailer
-     means even if some earlier partial commit slipped through, task-reconcile.sh would
-     have already caught it before reaching this branch).
-4. Failure-breaker for hangs (mirrors gate-failure K=3): cap re-spawns per task_id at 3.
-   3rd dead/hang cycle → mark task BLOCKED, surface the gathered evidence
-   (registry entry, TaskOutput result, reconcile verdict) to the user. Never loop forever —
-   one hung task must not silently retry forever nor silently hold up the whole run.
+reconciled  — git-proven done (Commit Convention: the commit only exists after gate
+              PASS). Copy evidence into the DAG (status=done). No further action.
+
+unverified  — worktree has uncommitted changes, no commit. This is EVIDENCE, not PROOF —
+              the gate was never actually run against this content by anyone we trust.
+              1. If the task's gate is a deterministic script (tsc/lint/tests/qa-gate
+                 checks): re-run it against the worktree's current file state.
+                 - PASS -> worktree-teardown.sh normally (commit) -> status=done.
+                 - FAIL -> worktree-teardown.sh ... "" --no-commit (discard) -> re-spawn
+                   fresh, counts against `attempts` (see step 4 below).
+              2. If the gate requires LLM/human judgment (e.g. conformance, GAN, security
+                 adversarial verify) that can't be mechanically re-run standalone: do NOT
+                 guess. Surface the worktree's diff to the user, ask whether to accept,
+                 re-verify with a fresh agent, or discard.
+              NEVER silently promote `unverified` to done — that ships unvetted work,
+              exactly what this harness exists to prevent.
+
+timed_out   — no evidence anywhere (clean or missing worktree, no commit). Genuinely
+              stuck or dead. For each:
+              1. Look up agent_id in .harness/agents/<task_id>.json for this task_id.
+                 Missing entry does NOT mean dead — see the registration note above;
+                 proceed to step 3 with unknown-liveness, not assumed-dead.
+              2. If agent_id known:
+                 TaskOutput(task_id: <agent_id>, block: false, timeout: 0)
+                 - still running, under 2x the task's timeout_seconds -> not stuck, just
+                   slow. Extend once; re-run parallel-wait.sh for the remaining group.
+                 - not running / errored / unknown -> proceed to step 3.
+              3. Dead (or liveness unknown because never registered):
+                 - If agent_id known: TaskStop(task_id: <agent_id>) — best-effort, ignore failure.
+                 - Discard its worktree: worktree-teardown.sh ... "" --no-commit
+                   This is a REAL discard (fixed: a prior version copied the worktree's
+                   files into the main tree even in --no-commit mode, only skipping the
+                   commit — that bug meant "discard" silently imported ungated content).
+                   Safe because nothing not already gate-PASSed was ever committed.
+                 - Re-spawn the SAME task_id fresh.
+              4. Failure-breaker for hangs (mirrors gate-failure K=3): increment this
+                 task's `attempts` field IN THE DAG (plan.dag.json) — not a transient
+                 in-context counter, which would reset to 0 across a context compaction
+                 and retry forever. Cap at 3. 3rd dead/hang cycle -> mark task BLOCKED,
+                 surface the gathered evidence (registry entry, TaskOutput result,
+                 both reconcile verdicts) to the user. Never loop forever — one hung task
+                 must not silently retry forever nor silently hold up the whole run.
 ```
 
 ### Observability
 
-Before surfacing a `timed_out` verdict to the user, run:
+Before surfacing a `timed_out` or `unverified` verdict to the user, run:
 ```bash
 bash ~/.claude/skills/execution-harness/scripts/harness-metrics.sh "$PROJECT_ROOT/.harness"
 ```
 Snapshot of `tasks_in_flight`, `stuck_count`, `oldest_agent_age_seconds` — include in the
 message to the user instead of a bare "still waiting." This is the harness's own golden
 signal, closing the same blind spot `observability.md` closes for shipped applications.
+Requires SKILL.md Step 8c's `status: in_progress` update on spawn — without it, every
+count here is zero regardless of what's actually running.
 
 ## Model + effort routing
 
